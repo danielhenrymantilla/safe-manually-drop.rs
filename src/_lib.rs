@@ -20,13 +20,61 @@ mod prelude {
 /// The main/whole point of this whole crate and design: to expose _owned_ access to a `FieldTy`
 /// when drop glue is being run.
 ///
-///  1. A [`SafeManuallyDrop<FieldTy, ContainingType>`],
-///  1. with a (mandatory) <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>
-///  1. shall be running the [`DropManually::drop_manually()`] logic on that, _owned_, `FieldTy`,
-///  1. when it gets dropped / during its drop glue.
+///   - A [`SafeManuallyDrop<FieldTy, ContainingType>`],
+///   - with a (mandatory)
+///     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
+///   - once it gets dropped / during its drop glue _from within a `ContainingType`_,
+///   - shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
+///
+/// In practice, this becomes _the_ handy, 0-runtime-overhead, non-`unsafe`, tool to get owned
+/// access to a `struct`'s field (or group thereof) during drop glue.
+///
+/// Indeed, the recipe then becomes:
+///
+///  1. Use, instead of a `field: FieldTy`, a wrapped
+///     <code>field: [SafeManuallyDrop]\<FieldTy, ContainingType\></code>,
+///
+///       - (Usually `Self` can be used instead of having to spell out, _verbatim_, the
+///         `ContainingType`.)
+///
+///       - (This wrapper type offers transparent
+///         <code>[Deref][`::core::ops::Deref`]{,[Mut][`::core::ops::DerefMut`]}</code>, as well as
+///         [`From::from()`] and ["`.into()`"][`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]
+///         conversions.)
+///
+///  1. then, provide the companion, mandatory,
+///     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>
+///
+///  1. Profit™ from the owned access to `FieldTy` inside of [`DropManually::drop_manually()`]'s
+///     body.
+///
+/// ### "`OverrideDropGlue`" rather than `PrependDropGlue`
 ///
 /// Note that this new drop glue logic for `FieldTy`, defined in [`DropManually::drop_manually()`],
 /// shall _supersede_ / override its default drop glue.
+///
+/// ```rust
+/// use ::safe_manually_drop::prelude::*;
+///
+/// pub struct MyType(SafeManuallyDrop<String, Self>);
+///
+/// impl DropManually<String> for MyType {
+///     fn drop_manually(s: String) {
+///         // stuff…
+///     } // <- unless `s` has been moved out (e.g., though `mem::forget()`),
+///       //    `s`' own drop glue (e.g., here, that of `String`) gets automagically
+///       //    invoked, rather similarly to the classic `Drop` trait.
+///       //    But the huge difference is that this function body had to *allow* it
+///       //    to happen, by not having *consumed* the owned `s: String` in some other
+///       //    way.
+/// }
+///
+/// fn example(it: MyType) {
+///     drop(it); // invokes the drop glue of `MyType`,
+///               // i.e., the `Drop` impl `for SafeManuallyDrop<String, MyType>`
+///               // i.e., `<MyType as DropManually<String>>::drop_manually()`.
+/// }
+/// ```
 ///
 /// For instance: if, inside of [`DropManually::drop_manually()`], the `FieldTy` is
 /// [`::core::mem::forget()`]ten, then `FieldTy`'s own drop glue shall never actually run, much like
@@ -49,21 +97,26 @@ mod prelude {
 ///   - types using owned type-state patterns, most notably `Transaction::{commit,roll_back}()`.
 #[diagnostic::on_unimplemented(
     note = "\
-        In order for a struct/enum to contain a `SafeManuallyDrop<FieldTy, …>` field:\n \
-        1. `…`, the second type parameter, ought to be `Self`, i.e., the containing `struct/enum` \
-          wherein the provided `DropManually` logic makes sense.\n \
-          For instance:\n\n \
-          ```rust\n \
-          SafeManuallyDrop<FieldTy, Self>\n \
-          ```\n\
-          \n \
-        2. you then have to provide an `impl<…> DropManually<FieldTy> for \
-          <the containing struct/enum> {{`.\n \
-          For instance:\n\n \
-          ```rust\n \
-          impl<…> DropManually<FieldTy> for StructName<…> {{\n \
-          ```\n\
-          \n\
+In order for a struct/enum to contain a `SafeManuallyDrop<FieldTy, …>` field:
+
+ 1. `…`, the second type parameter, ought to be `Self`, i.e., the containing `struct/enum` \
+    wherein the provided `DropManually` logic makes sense.
+
+    For instance:
+
+    ```rust
+    field: SafeManuallyDrop<FieldTy, Self>,
+    ```
+
+ 2. you then have to provide an \
+    `impl<…> DropManually<FieldTy> for <the containing struct/enum> {{`.
+
+    For instance:
+
+    ```rust
+    impl<…> DropManually<FieldTy> for StructName<…> {{
+    ```
+\
     ",
 )]
 pub
@@ -110,6 +163,7 @@ trait DropManually<FieldTy> {
 ///             &self.value
 ///         }
 ///     }
+///     // And `DerefMut`
 ///     ```
 ///
 ///   - Using [`Option<FieldTy>`] and [`.unwrap()`][`Option::unwrap()`]s everywhere…
@@ -148,6 +202,7 @@ trait DropManually<FieldTy> {
 ///                 .value
 ///         }
 ///     }
+///     // And `DerefMut`
 ///     ```
 ///
 ///   - Using [`SafeManuallyDrop<FieldTy, …>`][`SafeManuallyDrop`]: no `unsafe`, no `.unwrap()`s!
@@ -164,8 +219,8 @@ trait DropManually<FieldTy> {
 ///
 ///     pub
 ///     struct DeferGuard<T, F : FnOnce(T)>(
-///         // Option<DeferGuardFields<T, F>>,
-///         // ManuallyDrop<DeferGuardFields<T, F>>,
+///      // rather than `Option<DeferGuardFields<T, F>>`,
+///      // or `ManuallyDrop<DeferGuardFields<T, F>>`, use:
 ///         SafeManuallyDrop<DeferGuardFields<T, F>, Self>,
 ///     );
 ///
@@ -189,6 +244,7 @@ trait DropManually<FieldTy> {
 ///             &self.0.value
 ///         }
 ///     }
+///     // And `DerefMut`
 ///     ```
 ///
 /// ## Explanation
@@ -379,7 +435,7 @@ for
 }
 
 impl<FieldTy, ContainingType : DropManually<FieldTy>> SafeManuallyDrop<FieldTy, ContainingType> {
-    /// Main, `const`-friendly, way to construct a [`SafeManuallyDrop<FieldTy, …>`] instance.
+    /// Main, `const`-friendly, way to construct a [`SafeManuallyDrop<FieldTy, _>`] instance.
     ///
     /// Alternatively, there is a <code>[From]\<FieldTy> impl</code> as well.
     ///

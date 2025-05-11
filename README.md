@@ -19,14 +19,30 @@ https://github.com/rust-secure-code/safety-dance/)
 
 <!-- Templated by `cargo-generate` using https://github.com/danielhenrymantilla/proc-macro-template -->
 
+Convenience wrapper type —and `trait`!— to expose owned access to a field when customizing the drop
+glue of your type.
+
 ---
 
-# _Addendum_: `Drop impl` _vs._ drop glue _vs._ `drop()`
+## Prelude: `Drop impl` _vs._ drop glue _vs._ `drop()`
 
-It is generally rather important to properly distinguish these three notions, but especially so
-in the context of this crate!
+It is generally rather important to properly distinguish between these three notions, but especially
+so in the context of this crate!
 
-## What does `drop(value)` do?
+Only skip this section if you can confidently answer what `drop` means in the context of:
+
+  - `trait Drop { fn drop(&mut self); }`
+  - `mem::drop::<T>(…);`
+  - `ptr::drop_in_place::<T>(…);`
+  - `mem::needs_drop::<T>();`
+
+and if it is obvious to you that `String` does _not_ `impl Drop`.
+
+Otherwise, keep reading.
+
+<details class="custom" open><summary><span class="summary-box"><span>Click to hide</span></span></summary>
+
+### What does `drop(value)` do?
 
 In a nutshell, _nothing_; at least within its function body, which is _utterly empty_. All of the
 `drop(value)` semantics stem, merely, from `move` semantics, wherein the _scope of `value`_ is now
@@ -40,7 +56,10 @@ fn drop<T>(value: T) {
 } // <- it simply gets "discarded" here.
 ```
 
-## What happens *exactly* when a `value: T` goes out of scope / gets "discarded"?
+  - imho, this function ought rather to be called `force_discard()` (or `move_out_of_scope()`) than
+    `drop()`, should we be reaching a point where we mix up the different "drop" notions.
+
+### What happens *exactly* when a `value: T` goes out of scope / gets "discarded"?
 
 The story goes as follows: in Rust, when an "owned value" (`value: T`) / owned "variable" / owned
 "binding" (even anonymous ones!) goes out of scope, it gets "_discarded_":
@@ -52,22 +71,25 @@ The story goes as follows: in Rust, when an "owned value" (`value: T`) / owned "
  // `value` gets discarded here.
  // v
     } // <- compiler emits: `discard!(value)`, sort to speak,
-// where `discard!(value)` could be defined as:
-if const { ::core::mem::needs_drop::<T>() } {
-    unsafe {
-        // Run *the drop glue of `T`* for that `value`.
-        ptr::drop_in_place::<T>(&raw mut value);
+    // where `discard!(value)` could be defined as:
+    if const { ::core::mem::needs_drop::<T>() } {
+        unsafe {
+            // Run *the drop glue of `T`* for that `value`.
+            drop_in_place::<T>(&mut value);
+        }
+        // now that the value has been dropped, we can consider the bits inside `value` to be
+        // "exhausted"/empty, which I shall refer to as `Uninit<T>` (it probably won't be actually
+        // uninit, but it *morally* / logically can be deemed as such, imho).
     }
-    // now that the value has been dropped, we can consider the bits inside `value` to be
-    // "exhausted"/empty, which I shall refer to as `Uninit<T>` (it probably won't be actually
-    // uninit, but it *morally* / logically can be deemed as such, imho).
-}
-local_storage_dealloc!(value); // makes sure the backing `Uninit<T>` storage can be repurposed.
+    local_storage_dealloc!(value); // makes sure the backing `Uninit<T>` storage can be repurposed.
 ```
 
 So this now requires knowing what _the drop glue of `T`_ is.
 
-## The drop glue of some type `T`
+### The drop glue of some type `T`
+
+[^drop_union]: this, in fact, is why Rust conservatively restricts `union` definitions to fields
+known not to have any drop glue whatsover: `Copy` types, and `ManuallyDrop<T>`.
 
 is defined "inductively" / structurally, as follows:
 
@@ -80,7 +102,7 @@ is defined "inductively" / structurally, as follows:
 
   - else, _i.e._, for `struct/enum/union`s:
 
-      - (`union`s are `unsafe`, so they get no _inherent_ drop glue;)
+      - (`union`s are `unsafe`, so they get no _inherent_ drop glue[^drop_union])
 
       - `enum`s get the _inherent_ drop glue of every field type of the active variant;
 
@@ -91,10 +113,10 @@ is defined "inductively" / structurally, as follows:
     mechanism, alone, would be unable to feature something as basic as the `free()`ing logic of the
     drop glue of a `Box`…
 
-    Hence the need for the `PrependedDropGlue` trait:
+    Hence the need for the `PrependDropGlue` trait:
 
     ```rust
-    trait PrependedDropGlue {
+    trait PrependDropGlue {
         fn right_before_dropping_in_place_each_field_do(&mut self);
     }
     ```
@@ -102,11 +124,11 @@ is defined "inductively" / structurally, as follows:
     _e.g._,
 
     ```rust
-    # use ::core::ptr;
+    # use ::core::ptr::drop_in_place;
     #
     # macro_rules! reminder_of_what_the_compiler_does_afterwards {( $($tt:tt)* ) => ( )}
     #
-    # trait PrependedDropGlue {
+    # trait PrependDropGlue {
     #     fn right_before_dropping_in_place_each_field_do(&mut self);
     # }
     #
@@ -121,16 +143,25 @@ is defined "inductively" / structurally, as follows:
     // so far does nothing.
 
     // Hence:
-    impl<T> PrependedDropGlue for Box<T> {
+    impl<T> PrependDropGlue for Box<T> {
         fn right_before_dropping_in_place_each_field_do(&mut self) {
           unsafe {
             // 1. make sure our well-init/valid pointee gets itself to be dropped;
             //    it's now or never!
-            ptr::drop_in_place::<T>(self.ptr);
+            //    This takes care of the *transitively-owned* resources.
+            //    e.g., when `T=String`, a `Box<String>` owns two heap resources:
+            //      - some `str | [MaybeUninit<u8>]` byte buffer in the heap (what the `String`
+            //        owns);
+            //      - the `String { ptr: *mut u8, len: usize, cap: usize }` itself, which is behind
+            //        `Box` indirection.
+            //   This `1.` step is then taking care of freeing the byte buffer in the heap.
+            drop_in_place::<T>(&mut *self.ptr);
 
             // 2. since our pointer stemmed from a call to `(m)alloc` or whatnot,
             //    we need to `free()` now, so that the `Uninit<T>` to which `self.ptr`
             //    points can be repurposed by the allocator.
+            //
+            //    Back to our `T` example, this `free()` call releases the 3 "words" in`String { … }`.
             //
             //    (we are papering over ZSTs).
             ::std::alloc::dealloc(self.ptr.cast(), ::std::alloc::Layout::new::<T>());
@@ -138,11 +169,13 @@ is defined "inductively" / structurally, as follows:
         }
         // "now" the rest of inherent drop glue runs:
         reminder_of_what_the_compiler_does_afterwards! {
-            ptr::drop_in_place::<*mut T>(&raw mut self.ptr);
-            //                   ^^^^^^                ^^^
-            //                  FieldType            field_name
+            drop_in_place::<*mut T>(&mut self.ptr);
+            //              ^^^^^^            ^^^
+            //             FieldType        field_name
             // and so on, for each field (here, no others)
         }
+        // and finally, `local_storage_dealloc!(…)`, _i.e._, mark the by-value `Uninit<*mut T>`
+        // as re-usable for other local storage.
     }
     ```
 
@@ -153,8 +186,15 @@ is defined "inductively" / structurally, as follows:
 
     The names used for these things in the standard library are the following:
 
-      - `PrependedDropGlue -> Drop`
+      - `PrependDropGlue -> Drop`
       - `fn right_before_dropping_in_place_each_field_do(&mut self)` -> `fn drop(&mut self)`.
+
+          - To clarify, I wouldn't intend this function to be named in such a long and unwieldy way,
+            I have only done that for teaching purposes. A more fitting term w.r.t. a standard
+            library _etiquette_ would rather be `fn drop_prelude(&mut self)`, or
+            `fn before_drop(&mut self)`. I do like the `PrependDropGlue` name, though, but I would
+            be amenable to it having been named `DropPrelude` instead. Anything but that bare,
+            unqualified, and ambiguous, `Drop` name.
 
     Hence:
 
@@ -171,15 +211,15 @@ is defined "inductively" / structurally, as follows:
 
      1. Then, transitively running the drop glue for each and every (active) field of the type.
 
-## The `Drop` trait
+### The `Drop` trait
 
-is basically the `PrependedDropGlue` trait mentioned above.
+is basically the `PrependDropGlue` trait mentioned above.
 
 ### Having drop glue _vs._ `impl`ementing `Drop`
 
 Notice how, since this is just about manually prepending custom drop glue at some layer type, the
 moment the type gets wrapped within another one, that other one shall "inherit" this drop glue by
-structural composition, and won't need, itself, to repeat that `impl PrependedDropGlue`.
+structural composition, and won't need, itself, to repeat that `impl PrependDropGlue`.
 
 To better illustrate this, consider the following case study: the drop glue of [`Vec<_>`][`Vec`] &
 [`String`]:
@@ -187,9 +227,9 @@ To better illustrate this, consider the following case study: the drop glue of [
 ```rust
 # macro_rules! reminder_of_what_the_compiler_does_afterwards {( $($tt:tt)* ) => ()}
 # macro_rules! reminder_of_the_compiler_generated_drop_glue {( $($tt:tt)* ) => ()}
-# use ::core::{mem::size_of, ptr};
+# use ::core::{mem::size_of, ptr::drop_in_place, slice};
 #
-# trait PrependedDropGlue {
+# trait PrependDropGlue {
 #     fn right_before_dropping_in_place_each_field_do(&mut self);
 # }
 #
@@ -199,7 +239,7 @@ struct Vec<T> {
     capacity: usize,
 }
 
-impl<T> PrependedDropGlue for Vec<T> {
+impl<T> PrependDropGlue for Vec<T> {
     fn right_before_dropping_in_place_each_field_do(&mut self) {
         let Self { ptr, len, capacity } = *self;
         if size_of::<T>() == 0 || capacity == 0 {
@@ -207,7 +247,7 @@ impl<T> PrependedDropGlue for Vec<T> {
         }
         unsafe {
             // 1. drop the `len` amount of init values/items;
-            ptr::slice_from_raw_parts_mut(ptr, len).drop_in_place();
+            drop_in_place::<[T]>(&mut *slice::from_raw_parts_mut(ptr, len));
 
             // 2. deällocate the backing heap buffer.
             ::std::alloc::dealloc(
@@ -219,9 +259,11 @@ impl<T> PrependedDropGlue for Vec<T> {
         }
     }
     reminder_of_what_the_compiler_does_afterwards! {
-        ptr::drop_in_place::<*mut T>(&raw mut self.ptr); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut self.len); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut self.capacity); // does nothing
+        drop_in_place::<*mut T>(&mut self.ptr); // does nothing
+        drop_in_place::<usize>(&mut self.len); // does nothing
+        drop_in_place::<usize>(&mut self.capacity); // does nothing
+        // local_storage_dealloc!(…); // makes the by-value local storage for these 3 words be
+                                      // re-usable.
     }
 }
 
@@ -236,30 +278,33 @@ reminder_of_the_compiler_generated_drop_glue! {
     /* None! */
 
     // 2. inherent / structurally inherited sub-drop-glue(s).
-    ptr::drop_in_place::<Vec<u8>>(&raw mut self.utf8_buffer);
+    drop_in_place::<Vec<u8>>(&mut self.utf8_buffer);
     // i.e.
     {
         let vec: &mut Vec<u8> = &mut self.utf8_buffer;
 
-        // 1. prepended drop glue, if any
+        // 2.1. prepended drop glue, if any
         <Vec<u8> as PrependendDropGlue>::right_before_dropping_in_place_each_field_do(
+            // this is where the meat of the resource reclaimation occurs, in this example.
             vec,
         );
 
-        // 2. inherent / structurally inherited sub-drop-glues.
-        ptr::drop_in_place::<*mut T>(&raw mut vec.ptr); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut vec.len); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut vec.capacity); // does nothing
+        // 2.2. inherent / structurally inherited sub-drop-glues.
+        drop_in_place::<*mut T>(&mut vec.ptr); // does nothing
+        drop_in_place::<usize>(&mut vec.len); // does nothing
+        drop_in_place::<usize>(&mut vec.capacity); // does nothing
     }
+
+    // 3. `local_storage_dealloc!(self.utf8_buffer)`.
 }
 ```
 
-> So, in light of this, do we need to `impl PrependedDropGlue for String {`?
+> So, in light of this, do we need to `impl PrependDropGlue for String {`?
 >
 > No!
 
 Since it contains a `Vec<u8>` field, all of the drop glue of a `Vec<u8>`, including the
-`PrependedDropGlue for Vec<u8>` logic shall get invoked already.
+`PrependDropGlue for Vec<u8>` logic shall get invoked already.
 
 And such logic already takes care of managing the resources of the `Vec`. Which means that such
 resources get properly cleaned up / reclaimed assuming `Vec`'s own logic does (which it indeed
@@ -271,8 +316,8 @@ lest double-freeing ensues.
 
 This means we end up in a sitation wherein:
 
-  - `Vec<…> : PrependedDropGlue`
-  - `String :! /* its _own_ layer of */ PrependedDropGlue`.
+  - `Vec<…> : PrependDropGlue`
+  - `String :! /* its _own_ layer of */ PrependDropGlue`.
 
 And yet both have meaningful drop glue:
 
@@ -290,13 +335,14 @@ In "drop/`Drop`" parlance:
 This is generally why having `T : Drop` kind of bounds in generics is an anti-pattern —an explicitly
 linted one!—, and a big smell indicating that the person having written this has not properly
 understood these nuances (which, again, is a very legitimate mistake to make, since the Rust
-standard library has used the "drop" word, alone, for three distinct things, `Drop`,
-`fn drop(&mut self)`, and `fn drop<T>(_: T)`, and that is without including the fourth occurrence of
-the name, in `drop_in_place()`. As a reminder, the first two usages of "drop" here refer to
-prepended drop glue, the third usage, `fn drop<T>(_: T)`, refers rather about _discarding_ a value /
-forcing it to go out of scope, and the fourth and last usage, `drop_in_place()` (along
-`needs_drop()`) finally refers to the proper act of dropping a value, as in, running all of its drop
-glue (both the prepended one, if any, and the structurally inherited one)).
+standard library has used the "drop" word, alone, for three distinct things, `Drop` &
+`fn drop(&mut self)`, `fn drop<T>(_: T)`, and `fn drop_in_place<T>(*mut T)`. As a reminder, the
+first usage of "`Drop`/`fn drop(&mut self)` here refers to prepended drop glue; the second usage,
+`fn drop<T>(_: T)`, refers rather about _discarding_ a value / forcing it to go out of scope,
+and the third and last usage, `drop_in_place()` (alongside `needs_drop()`) finally refers to the
+proper act of dropping a value, as in, running all of its drop glue (both the prepended one, if any,
+and the structurally inherited one (but not running the
+`local_storage_dealloc!(self.utf8_buffer)`)).
 
 ### `&mut` or owned access in `Drop`?
 
@@ -306,8 +352,18 @@ With all that has been said, it should now be clear(er) why that trait only expo
 Indeed, if we received owned access to `self` in the `fn drop(…)` function, it would mean, as per
 the ownership / move semantics of the language, running into a situation where the owned `self`
 would run out of scope, get discarded, and thus, get _dropped_ (in place) / get its drop glue
-invoked, which would mean invoking this (`Prepended`)`Drop`(`Glue`) first, which would discard this
+invoked, which would mean invoking this (`Prepend`)`Drop`(`Glue`) first, which would discard this
 owned `self`, _ad infinitum et nauseam_[^nauseam].
+
+```rust ,ignore
+impl DropOwned for Thing {
+    fn drop_owned(self: Thing) {
+        // stuff…
+    } // <- `self` gets discarded here, so its drop glue gets invoked.
+      //    Assuming `DropOwned` to be a magic trait to override this logic, it
+      //    would mean that `Thing::drop_owned()` would get invoked here, *AGAIN*.
+}
+```
 
 [^nauseam]: probably a stack overflow due to infinite recursion, else "just" a plain old
 thread-hanging infinite loop.
@@ -315,19 +371,72 @@ thread-hanging infinite loop.
  1. Which means every `DropOwned` impl, if it existed, would have to make sure to `forget(self)` at
     the end of its scope!
 
- 1. But even if we did that (to avoid the infinite recursion problem), we'd still have the problem
-    of the inherent drop glue then dropping each field "again".
+ 1. But even if we did that (to avoid the infinite recursion problem), there is also the question
+    of dropping each field:
 
-    Because, again, at the end of the day, `PrependedDropGlue` is not the full, drop-glue picture!
-    Owned access to the being-dropped(-in-place) resource cannot be offered in `PrependedDropGlue`,
-    since it represents just a _prelude_, after which access to the being-dropped(-in-place) value is
-    relinquished, passed on to the rest of the [`drop_in_place()`][`::core::ptr::drop_in_place()`]
-    machinery.
+      - we may want to be the ones doing it explicitly in the `fn` body (_e.g._,
+      `drop(self.some_field);`);
 
-    So to avoid this we'd have to also `forget()` every field beforehand; at which point, what has
-    been the point of that initial owned access to begin with?
+          - so even more reason to make sure we are `mem::forget()`ting stuff at the end!
 
-## What would it take to have owned access in custom drop glue / `drop_in_place()` logic?
+      - but if we are `mem::forget()`-ting `self` at the end of the `fn` body, then:
+
+          - that would not be valid if we had done `drop(self.some_field);` beforehand;
+
+          - and if we were to forget to eventually call `drop(self.field)` for every field before the
+            end/final `mem::forget(self);`, then we'd be skipping the drop glue of all of these
+            fields, which would be quite a footgun;
+
+      - so the only way to conceive this happening properly would be to require the following `fn`
+        prelude and epilogue:
+
+        ```rust ,ignore
+        // 1. we use `unsafe` to duplicate these fields, *and their ownership*.
+        let (a, b, ..., field) = unsafe {
+            (
+                (&raw const self.a).read(),
+                (&raw const self.b).read(),
+                ...,
+                (&raw const self.field).read(),
+            )
+        };
+
+        /* 2. DROP OWNED FIELDS LOGIC HERE. */
+        // We can:
+        // drop(field);
+        // as well as:
+        // _overlooking_ to do so, since `a`, `b`, ... all go out of scope at the end of this `fn`
+        // body anyways.
+
+        // 3. Finally: disable the drop glue of self, and thus, of the original fields (so we don't
+        // double-drop) anything.
+        mem::forget(self);
+        ```
+
+        And to do this in a slightly more robust fashion (w.r.t. `panic!`-safety):
+
+        ```rust ,ignore
+        // 3. `defer! { mem::forget(self) }`, sort-to-speak; in a robust manner.
+        let this = ::core::mem::ManuallyDrop::new(self);
+        // 1.  we use `unsafe` to duplicate these fields, *and their ownership*.
+        let (a, b, ..., field) = unsafe {
+            (
+                (&raw const this.a).read(),
+                (&raw const this.b).read(),
+                ...,
+                (&raw const this.field).read(),
+            )
+        };
+
+        /* 2. DROP OWNED FIELDS LOGIC HERE. */
+        // We can:
+        // drop(field);
+        // as well as:
+        // _overlooking_ to do so, since `a`, `b`, ... all go out of scope at the end of this `fn`
+        // body anyways.
+        ```
+
+### What would it take to have owned access in custom drop glue / `drop_in_place()` logic?
 
 Well, if we stare at those two previous points, we can see a path forward towards "the perfect
 `DropGlue` trait".
@@ -353,7 +462,7 @@ So here is what such a trait could look like:
 ```rust ,ignore
 // In pseudo-code.
 trait OverrideDropGlue {
-    fn drop(Self { ..fields });
+    fn drop(fields_of!(Self { .. }));
 }
 
 // A concrete example:
@@ -385,26 +494,25 @@ impl OverrideDropGlue for CustomDropOrder {
 ```
 
   - What I like about this last syntax is that braced-`struct` destructuring, if it were
-    _ever_[^hope] available to an `impl PrependedDropGlue` (or an `impl OverrideDropGlue` type),
+    _ever_[^hope] available to an `impl PrependDropGlue` (or an `impl OverrideDropGlue` type),
     would entail "defusing"/bypassing/skipping it, and instead, just extracting raw access to the
-    fields; which is _exactly_ the desired behavior here! That _defusing_ is exactly what avoids
-    the infinitely recursive drop logic in a neat and succint way!
+    fields; which is _exactly_ the desired behavior here! That _defusing_ (of the shallowmost layer
+    of `PrependDropGlue`) is exactly what avoids the infinitely recursive drop logic in a neat and
+    succint way!
 
-[^hope]: I really thing we should be given such a tool, even if it would entail memory leaks in
-visibility-capable codebases doing things such as
-```rust ,ignore
-let MyVec { ptr, len, cap } = vec; // same as into_raw_parts, leaky pattern!
-```
+[^hope]: I really think we should be given such a tool, even if it would entail memory leaks in
+visibility-capable codebases doing things such as `let MyVec { ptr, len, cap } = my_vec;` (same as
+`into_raw_parts`: leaky pattern).
 
-### Back to this crate, or to `::drop_with_owned_fields`
+## Back to this crate, or to `::drop_with_owned_fields`
 
-Now, if you stare at what either this crate, or even more so the companion
-[`::drop_with_owned_fields`] crate, do, you'll notice it's all trying to offer a user-library /
-third-party-library powered way to offer such an API to users of this library.
+Now, if you stare at either this crate, or even more so at the companion
+[`::drop_with_owned_fields`] crate, you'll notice they're both trying to offer a user-library /
+third-party-library powered way to offer such an API to users of these libraries.
 
 [`::drop_with_owned_fields`]: https://docs.rs/drop-with-owned-fields/^0.1.1
 
-Using [`::drop_with_owned_fields`] for instance:
+### Using the [`::drop_with_owned_fields`] helper crate, for starters:
 
 ```rust
 use ::drop_with_owned_fields::prelude::*;
@@ -433,11 +541,14 @@ impl Drop for CustomDropOrder {
   - Notice how, for the sake of being less jarring to users, that macro API asks for the `Drop`
     trait to be involved, since it's probably the least surprising choice for unaware users.
 
-    But you 🫵 attentive reader of my whole diatribe, should know better: since `Drop` means
-    `PrependedDropGlue`, it's not the right trait to be using in this scenario.
+    But you 🫵, attentive reader of my whole diatribe, should know better: since `Drop` means
+    `PrependDropGlue`, it's not the right trait to be using in this scenario. It should have
+    been this imagined `OverrideDropGlue` trait instead.
 
-    You can go and be explicit even with that macro API, if you forgo its `drop_sugar` API and
-    eponymous Cargo feature:
+    In fact, you can go and be more explicit about the "drop-related" `impl`, even in the
+    context of this macro-based `::drop_with_owned_fields` crate, if you forgo its `drop_sugar`
+    API and eponymous Cargo feature, and instead directly target _the real trait_,
+    `DropWithOwnedFields`:
 
     ```rust
     use ::drop_with_owned_fields::prelude::*;
@@ -463,11 +574,13 @@ impl Drop for CustomDropOrder {
     ```
 
     The resulting `DropWithOwnedFields` is the closest a library API can get to the dreamed
-    `OverrideDropGlue` trait and language support.
+    `OverrideDropGlue` trait and language support, I'd say.
 
-___
+### And using this very crate rather than macros:
 
-And using this very crate rather than macros:
+</details>
+
+# Owned access to a type's field in custom drop logic
 
 ```rust
 //! Look ma, no macros!
@@ -486,7 +599,7 @@ struct Fields {
     c: C,
 }
 
-impl DropManually<Fields> for CustomDropOrder {
+impl DropManually<Fields> for /* the drop glue of */ CustomDropOrder {
     fn drop_manually(Fields { a, b, c }: Fields) {
         drop(b);
         drop(a);
@@ -494,3 +607,5 @@ impl DropManually<Fields> for CustomDropOrder {
     }
 }
 ```
+
+See the docs of [`SafeManuallyDrop`] for more info.
