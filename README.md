@@ -139,7 +139,7 @@ to explicitly `.commit()` it at the end of their happy paths.
 #         pub fn roll_back(self) {}
 #     }
 # }
-
+#
 struct WrappedTransaction(some_lib::Transaction);
 
 impl WrappedTransaction {
@@ -161,6 +161,7 @@ If we go with the naïve approach, we'd end up doing:
 #         pub fn roll_back(self) {}
 #     }
 # }
+#
 struct WrappedTransaction(some_lib::Transaction);
 
 // 👇
@@ -278,6 +279,7 @@ fn defer(f: impl FnOnce()) -> impl Drop {
 #         pub fn roll_back(self) {}
 #     }
 # }
+#
 struct WrappedTransaction(Option<some_lib::Transaction>);
 //                        +++++++                     +
 
