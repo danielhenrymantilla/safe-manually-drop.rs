@@ -234,11 +234,12 @@ The first error is directly related to the lack of owned access, and instead, th
 
   - (and the second error is a mild corollary from it, as in, the only way to extract owned access
     to a field of a `struct` would be by _deconstructing_ it, which would entail _defusing its
-    extra/prepended drop glue_.)
+    extra/prepended drop glue_, and that is something which Rust currently conservatively rejects
+    (hard error, rather than some lint or whatnot…).)
 
 # How rustaceans currently achieve owned access in drop
 
-## Either `Option`-`{un,}`wrapping the field in question
+## Either `Option`-`{un,}wrap`ping the field
 
 The developer would wrap the field in question in an `Option`, expected to always be `Some` for
 the lifetime of every instance, but for those last-breath/deathrattle moments in `Drop`, wherein the
@@ -292,11 +293,11 @@ impl WrappedTransaction {
     fn commit(self) {
         let mut this = ::core::mem::ManuallyDrop::new(self);
         if true {
-            // naïve, simple, approach
+            // naïve, simple, approach (risk of leaking *other* fields (if any))
             let txn = this.0.take().expect("🤢");
             txn.commit();
         } else {
-            // better approach (which yearns for a macro):
+            // better approach (it does yearn for a macro):
             let (txn, /* every other field here */) = unsafe { // 😰
                 (
                     (&raw const this.0).read(),
@@ -309,7 +310,7 @@ impl WrappedTransaction {
 }
 ```
 
-## Or `unsafe`-ly `ManuallyDrop`-wrapping the field in question
+## Or `unsafe`-ly `ManuallyDrop`-wrapping the field
 
 The developer would wrap the field in question in a `ManuallyDrop`, expected never to have been
 `ManuallyDrop::drop()`ped already for the lifetime of every instance, but for those
@@ -372,13 +373,13 @@ impl WrappedTransaction {
     fn commit(self) {
         let mut this = ::core::mem::ManuallyDrop::new(self);
         if true {
-            // naïve, simple, approach
+            // naïve, simple, approach (risk of leaking *other* fields (if any))
             let txn = unsafe {
                 ManuallyDrop::take(&mut this.0)
             };
             txn.commit();
         } else {
-            // better approach (which yearns for a macro):
+            // better approach (it does yearn for a macro):
             let (txn, /* every other field here */) = unsafe { // 😰
                 (
                     (&raw const this.0).read(),
@@ -414,16 +415,17 @@ fn defer(f: impl FnOnce()) -> impl Sized {
     // where:
     use ::safe_manually_drop::{SafeManuallyDrop, DropManually}; // 👈
 
-    struct Wrapper<F : FnOnce()>(SafeManuallyDrop<F, Self>);
-    //                           +++++++++++++++++ +++++++
-
-    // 👇 instead of the `Drop` trait, use:
+    // 👇 1. instead of the `Drop` trait, use:
     impl<F : FnOnce()> DropManually<F> for Wrapper<F> {
         fn drop_manually(f: F) {
-            // It is, *that simple*, yes!
+            // It is *that simple*, yes!
             f();
         }
     }
+
+    // 2. `SafeManuallyDrop` shall use it on `Drop`
+    struct Wrapper<F : FnOnce()>(SafeManuallyDrop<F, Self>);
+    //                           +++++++++++++++++ +++++++
 }
 ```
 
@@ -444,14 +446,14 @@ struct WrappedTransaction(SafeManuallyDrop<some_lib::Transaction, Self>);
 
 impl DropManually<some_lib::Transaction> for WrappedTransaction {
     fn drop_manually(txn: some_lib::Transaction) {
-        // It is, *that simple*, yes!
+        // It is *that simple*, yes!
         txn.roll_back();
     }
 }
 
 impl WrappedTransaction {
     fn commit(self) {
-        // It is, *that f*ckin simple*, yes!
+        // It is *that friggin' simple*, yes! (no risk to leak the other fields 🤓)
         let txn = self.0.into_inner_defusing_impl_Drop();
         txn.commit();
     }
