@@ -31,7 +31,7 @@ Non-macro equivalent of
 
 To expose _owned_ access to a `FieldTy` when drop glue is being run:
 
-  - a [`SafeManuallyDrop<FieldTy, ContainingType>`],
+  - a [`SafeManuallyDrop<FieldTy, ContainingType>`][`SafeManuallyDrop`],
   - with a (mandatory)
     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
   - once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
@@ -514,7 +514,7 @@ And _voilà_ 😙👌
 
 # _Addendum_: `Drop impl` _vs._ drop glue _vs._ `drop()`
 
-  - See [the relevant module][`crate::appendix`]
+  - See [the relevant module][`appendix`]
 
 It is generally rather important to properly distinguish between these three notions, but especially
 so in the context of this crate!
@@ -527,3 +527,16 @@ Only skip this section if you can confidently answer what `drop` means in the co
   - `mem::needs_drop::<T>();`
 
 and if it is obvious to you that `String` does _not_ `impl Drop`.
+
+[`SafeManuallyDrop`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html
+[`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html#method.into_inner_defusing_impl_Drop
+[`DropManually`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/trait.DropManually.html
+[`DropManually::drop_manually()`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/trait.DropManually.html#tymethod.drop_manually
+[`appendix`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/appendix/index.html
+
+[`ManuallyDrop`]: https://doc.rust-lang.org/stable/core/mem/struct.ManuallyDrop.html
+[`::core::ops::Deref`]: https://doc.rust-lang.org/stable/core/ops/trait.Deref.html
+[`::core::ops::DerefMut`]: https://doc.rust-lang.org/stable/core/ops/trait.DerefMut.html
+[`Drop`]: https://doc.rust-lang.org/stable/core/ops/trait.Drop.html
+[`Option`]: https://doc.rust-lang.org/stable/core/option/enum.Option.html
+[`From::from`]: https://doc.rust-lang.org/stable/core/convert/trait.From.html#tymethod.from
