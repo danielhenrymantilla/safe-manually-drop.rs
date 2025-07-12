@@ -1,11 +1,17 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(doc), no_std)]
 #![allow(unused_braces)]
+#![cfg_attr(feature = "better-docs", feature(doc_cfg))]
 
 use ::core::{
     marker::PhantomData as PD,
     mem::{ManuallyDrop, ManuallyDrop as MD},
 };
+
+#[cfg(doc)]
+#[cfg_attr(feature = "better-docs", doc(cfg(doc)))]
+#[doc = include_str!("appendix.md")]
+pub mod appendix {}
 
 /// The crate's prelude.
 pub
@@ -23,7 +29,7 @@ mod prelude {
 ///   - A [`SafeManuallyDrop<FieldTy, ContainingType>`],
 ///   - with a (mandatory)
 ///     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
-///   - once it gets dropped / during its drop glue _from within a `ContainingType`_,
+///   - once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
 ///   - shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
 ///
 /// In practice, this becomes _the_ handy, 0-runtime-overhead, non-`unsafe`, tool to get owned
