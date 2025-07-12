@@ -16,8 +16,10 @@ repository = "https://github.com/danielhenrymantilla/safe-manually-drop.rs"
 documentation = "https://docs.rs/safe-manually-drop"
 readme = "README.md"
 
-# description = "…"
-# keywords = []
+description = """`ManuallyDrop` "owned field" pattern with no `unsafe`, no `.unwrap()`s, no macros"""
+keywords = [
+    "patterns", "drop", "ManuallyDrop", "unsafe", "safe",
+]
 
 [features]
 default = [
