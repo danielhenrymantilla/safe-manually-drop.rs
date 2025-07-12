@@ -1,3 +1,4 @@
+//! [SafeManuallyDrop]: `SafeManuallyDrop`
 //! [`SafeManuallyDrop`]: `SafeManuallyDrop`
 //! [`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]: `SafeManuallyDrop::into_inner_defusing_impl_Drop()`
 //! [`DropManually`]: `DropManually`
@@ -9,7 +10,7 @@
 //! [`::core::ops::DerefMut`]: `::core::ops::DerefMut`
 //! [`Drop`]: `Drop`
 //! [`Option`]: `Option`
-//! [`From::from`]: `From::from`
+//! [`From::from()`]: `From::from()`
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(doc), no_std)]
 #![allow(unused_braces)]

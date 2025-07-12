@@ -528,6 +528,7 @@ Only skip this section if you can confidently answer what `drop` means in the co
 
 and if it is obvious to you that `String` does _not_ `impl Drop`.
 
+[SafeManuallyDrop]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html
 [`SafeManuallyDrop`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html
 [`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html#method.into_inner_defusing_impl_Drop
 [`DropManually`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/trait.DropManually.html
@@ -539,4 +540,4 @@ and if it is obvious to you that `String` does _not_ `impl Drop`.
 [`::core::ops::DerefMut`]: https://doc.rust-lang.org/stable/core/ops/trait.DerefMut.html
 [`Drop`]: https://doc.rust-lang.org/stable/core/ops/trait.Drop.html
 [`Option`]: https://doc.rust-lang.org/stable/core/option/enum.Option.html
-[`From::from`]: https://doc.rust-lang.org/stable/core/convert/trait.From.html#tymethod.from
+[`From::from()`]: https://doc.rust-lang.org/stable/core/convert/trait.From.html#tymethod.from
