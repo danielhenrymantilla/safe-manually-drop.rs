@@ -29,18 +29,8 @@ Non-macro equivalent of
 
 ---
 
-To expose _owned_ access to a `FieldTy` when drop glue is being run:
-
-  - a [`SafeManuallyDrop<FieldTy, ContainingType>`][`SafeManuallyDrop`],
-  - with a (mandatory)
-    <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
-  - once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
-  - shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
-
-In practice, this becomes _the_ handy, 0-runtime-overhead, non-`unsafe`, tool to get owned
-access to a `struct`'s field (or group thereof) during drop glue.
-
-Indeed, the recipe then becomes:
+To expose _owned_ access to a `FieldTy` when drop glue is being run, this crate offers a handy,
+_0-runtime-overhead_, _non-`unsafe`_, tool:
 
  1. Use, instead of a `field: FieldTy`, a wrapped
     <code>field: [SafeManuallyDrop]\<FieldTy, Self\></code>,
@@ -53,14 +43,16 @@ Indeed, the recipe then becomes:
  1. then, provide the companion, mandatory,
     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>
 
- 1. Profit™:
+ 1. Profit™ (from the owned access to `FieldTy` inside of [`DropManually::drop_manually()`]'s body).
 
-      - from the owned access to `FieldTy` inside of
-        [`DropManually::drop_manually()`]'s body.
-      - from the convenience
+      - (and also from the convenience
         [`.into_inner_defusing_impl_Drop()`][`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]
         which shall "deconstruct" that `FieldTy` despite the `DropManually` impl
-        (which shall get defused).
+        (which shall get defused).)
+
+## Examples
+
+Available over [the relevant section](#enter-this-crate-safemanuallydrop-and-dropmanually).
 
 # Motivation: owned access to some field(s) on `Drop`
 

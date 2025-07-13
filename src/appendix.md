@@ -12,6 +12,8 @@ Only skip this section if you can confidently answer what `drop` means in the co
 
 and if it is obvious to you that `String` does _not_ `impl Drop`.
 
+<details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
+
 ## What does `drop(value)` do?
 
 In a nutshell, _nothing_; at least within its function body, which is _utterly empty_. All of the
@@ -279,7 +281,7 @@ Since it contains a `Vec<u8>` field, all of the drop glue of a `Vec<u8>`, includ
 And such logic already takes care of managing the resources of the `Vec`. Which means that such
 resources get properly cleaned up / reclaimed assuming `Vec`'s own logic does (which it indeed
 does). So `String` need not do anything, and in fact, ought very much not to be doing anything,
-lest double-freeing ensues.
+lest double-freeing ensue.
 
 > ➡️ Artificially prepended drop glue logic becomes inherent / structurally inherited drop glue at
 > the next layer of type wrapping.
@@ -305,14 +307,13 @@ In "drop/`Drop`" parlance:
 This is generally why having `T : Drop` kind of bounds in generics is an anti-pattern —an explicitly
 linted one!—, and a big smell indicating that the person having written this has not properly
 understood these nuances (which, again, is a very legitimate mistake to make, since the Rust
-standard library has used the "drop" word, alone, for three distinct things, `Drop` &
+standard library has used the "drop" word, alone, for three distinct things: `Drop` &
 `fn drop(&mut self)`, `fn drop<T>(_: T)`, and `fn drop_in_place<T>(*mut T)`. As a reminder, the
 first usage of "`Drop`/`fn drop(&mut self)` here refers to prepended drop glue; the second usage,
 `fn drop<T>(_: T)`, refers rather about _discarding_ a value / forcing it to go out of scope,
 and the third and last usage, `drop_in_place()` (alongside `needs_drop()`) finally refers to the
 proper act of dropping a value, as in, running all of its drop glue (both the prepended one, if any,
-and the structurally inherited one (but not running the
-`local_storage_dealloc!(self.utf8_buffer)`)).
+and the structurally inherited one (but not running the `local_storage_dealloc!(self.utf8_buffer)`)).
 
 ## `&mut` or owned access in `Drop`?
 
@@ -406,7 +407,113 @@ thread-hanging infinite loop.
         // body anyways.
         ```
 
-## What would it take to have owned access in custom drop glue / `drop_in_place()` logic?
+# TL,DR
+
+</details>
+
+<div style="max-width: 100%; overflow-x: auto; font-size: 0.69em;">
+
+<table border="1" cellspacing="0" cellpadding="8">
+  <!-- 3 -->
+  <tr>
+    <!-- B2:B4 -->
+    <td rowspan="3">
+<div style="text-align: center;">Discarding a <code>value: T</code></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// When `value: T` goes
+// out of scope:
+</span><span class="macro">out_of_scope!</span>(value: T);</code></pre></div>
+    </td>
+    <!-- C2:C3 -->
+    <td rowspan="2">
+<div style="text-align: center;">"Drop <em>glue</em>" of <code>T</code></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// if mem::needs_drop/*glue*/::&lt;T&gt;(),
+// 1. Run the drop glue for T
+</span>&lt;<span class="kw-2">*mut </span>T&gt;::drop_in_place(<span class="kw-2">&amp;mut </span>value);</code></pre><div class="button-holder"><button class="copy-button" title="Copy code to clipboard"></button></div></div>
+    </td>
+    <!-- D2 -->
+    <td>
+Firstly, when <code>T : PrependDropGlue / Drop</code>:
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>&lt;T as PrependDropGlue&gt;::drop_prelude(<span class="kw-2">&amp;mut </span>value)
+<span class="comment">// i.e., using actual stdlib terminology:
+</span>&lt;T as Drop&gt;::drop(<span class="kw-2">&amp;mut </span>value);</code></pre><div class="button-holder"><button class="copy-button" title="Copy code to clipboard"></button></div></div>
+    </td>
+  </tr>
+  <!-- 3 -->
+  <tr>
+    <!-- B done -->
+    <!-- C done -->
+    <!-- D3 -->
+    <td>
+And then, always:
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>#<span class="kw">for </span>#field of T {
+    <span class="comment">// if mem::needs_drop/*glue*/::&lt;FieldTy&gt;(),
+    </span>&lt;<span class="kw-2">*mut </span>#FieldTy&gt;::drop_in_place(<span class="kw-2">&amp;mut </span>value.#field);
+}</code></pre><div class="button-holder"><button class="copy-button" title="Copy code to clipboard"></button></div></div>
+    </td>
+  </tr>
+  <!-- 4 -->
+  <tr>
+    <!-- B done -->
+    <!-- C4 -->
+    <td>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="comment">// 2. StorageDead in MIR parlance
+</span><span class="macro">dealloc_local_storage!</span>(value: MaybeUninit&lt;T&gt;);</code></pre></div>
+    </td>
+  </tr>
+</table>
+
+  - About `mem::drop::<T>(value)` _vs._ `out_of_scope!(value: T)`:
+
+    ```rust
+    drop::<T>(value);
+    // is the same as:
+    {
+        let new_value: T;  // alloc_local_storage!(); i.e. StorageLive in MIR parlance
+        new_value = value; // 1. (shallow) bit-copy from `value` to `new_value`.
+                           // 2. `value` registered as "moved out of" (when !Copy):
+                           //      - further usage of `value` is forbidden
+                           //      - `dealloc_local_storage!(value)` allowed to happen.
+                           // Very likely compiler optimization: bitcopy elision, whereby
+                           // `new_value` is to re-use the local storage of `value`.
+
+    } // <- out_of_scope!(new_value: T);
+    ```
+
+    This is why `drop<T>(value)`, for a non-`Copy` value, ends up boiling down to _discarding_ such a
+    `value` / to _forcing it out of scope_:
+
+    ```rust
+    # /*
+    // Alternative names for `mem::drop()`:
+    drop(v) == discard(v) == force_out_of_scope(v) == yeet_out_of_scope(v) == move_out_of_scope(v)
+    # */
+    ```
+
+</div>
+
+So, to the question "**what does _dropping_ mean in Rust?**", hopefully it is now clear that such
+a question or definition is actually quite imprecise and ambiguous, since there are
+_three_ things which use the _drop_ terminology in Rust; granted, deeply-related, but not quite
+the same thing.
+
+Those three things are the different columns of that first "row" of the table:
+
+> 📝 Dropping a value, in Rust, can refer to: 📝
+>
+>   - what happens when a `value: T` goes out of scope, or quite relatedly, to a call to
+>     `mem::drop::<T>(value)`: the act of discarding a value / forcing it to go out of scope;
+>   - running the _drop glue_ of `T` for that `value`, which can be (`unsafe`ly) done _via_
+>     `ptr::drop_in_place::<T>(&mut value)`;
+>   - when `T : Drop` (and only then), to the prepended extra drop logic that is to run, within
+>     the drop glue of `T`, before each of its fields is being, itself, "dropped" / having its
+>     drop glue invoked.
+>
+> `<T as Drop>::drop()` is part of the drop glue of `T` which is itself part of what happens
+> when a `value: T` goes out of scope / gets discarded or `mem::drop()`ped.
+>
+> 📝
+
+# What would it take to have owned access in custom drop glue / `drop_in_place()` logic?
 
 Well, if we stare at those two previous points, we can see a path forward towards "the perfect
 `DropGlue` trait".
@@ -414,18 +521,18 @@ Well, if we stare at those two previous points, we can see a path forward toward
   - Starting from the latter bullet, this part can be solved in one of two ways:
 
       - as a library abstraction, by having the fields be [`ManuallyDrop`]-wrapped, since that
-        effectively disables the structurally inherited drop glue for that field (so if it is done
-        for each and every field we have effectively gotten rid of all of the structurally inherited
-        drop glue);
+        effectively disables the structurally inherited drop glue for that field (so, if it is done
+        for each and every field, we will have effectively gotten rid of all of the structurally
+        inherited drop glue);
 
       - as a language tweak, it would be trivial for the language to just stop injecting the
         structurally-inherited drop glue if the trait overriding the _whole_ drop glue were to be
         present;
 
   - Then, back to the former bullet, in order to avoid the infinite recursion of `self` drop issue,
-    the solution is simply a matter of picking the owned types involved with a bit more of
-    _finesse_: rather than getting full, owned, access to `self: Self` on `drop()`, we'd be getting
-    per field, owned access, to each field type.
+    the solution is simply a matter of picking the owned types involved with a bit more _finesse_:
+    rather than getting full, owned, access to `self: Self` on `drop()`, we'd be getting per field,
+    owned access, to each field type.
 
 So here is what such a trait could look like:
 
