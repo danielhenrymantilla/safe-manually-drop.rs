@@ -465,6 +465,7 @@ And then, always:
   - About `mem::drop::<T>(value)` _vs._ `out_of_scope!(value: T)`:
 
     ```rust
+    # /*
     drop::<T>(value);
     // is the same as:
     {
@@ -477,6 +478,7 @@ And then, always:
                            // `new_value` is to re-use the local storage of `value`.
 
     } // <- out_of_scope!(new_value: T);
+    # */
     ```
 
     This is why `drop<T>(value)`, for a non-`Copy` value, ends up boiling down to _discarding_ such a
