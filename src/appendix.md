@@ -411,7 +411,7 @@ thread-hanging infinite loop.
 
 </details>
 
-<div style="max-width: 100%; overflow-x: auto; font-size: 0.69em;">
+<div style="max-width: 100%; overflow-x: auto; font-size: 0.68em;">
 
 <table border="1" cellspacing="0" cellpadding="8">
   <!-- 3 -->
