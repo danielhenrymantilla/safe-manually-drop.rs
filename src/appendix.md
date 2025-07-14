@@ -474,7 +474,7 @@ And then, always:
                            // 2. `value` registered as "moved out of" (when !Copy):
                            //      - further usage of `value` is forbidden
                            //      - `dealloc_local_storage!(value)` allowed to happen.
-                           // Very likely compiler optimization: bitcopy elision, whereby
+                           // Very likely compiler optimization: bitcopy elision, wherein
                            // `new_value` is to re-use the local storage of `value`.
 
     } // <- out_of_scope!(new_value: T);
@@ -500,13 +500,13 @@ the same thing.
 
 Those three things are the different columns of that first "row" of the table:
 
-> 📝 Dropping a value, in Rust, can refer to: 📝
+> 📝 Dropping a value, in Rust, can refer: 📝
 >
->   - what happens when a `value: T` goes out of scope, or quite relatedly, to a call to
+>   - to what happens when a `value: T` goes out of scope, or quite relatedly, to a call to
 >     `mem::drop::<T>(value)`: the act of discarding a value / forcing it to go out of scope;
->   - running the _drop glue_ of `T` for that `value`, which can be (`unsafe`ly) done _via_
+>   - to running the _drop glue_ of `T` for that `value`, which can be (`unsafe`ly) done _via_
 >     `ptr::drop_in_place::<T>(&mut value)`;
->   - when `T : Drop` (and only then), to the prepended extra drop logic that is to run, within
+>   - when `T : Drop` (and only then), to this prepended extra drop logic that is to run, within
 >     the drop glue of `T`, before each of its fields is being, itself, "dropped" / having its
 >     drop glue invoked.
 >
