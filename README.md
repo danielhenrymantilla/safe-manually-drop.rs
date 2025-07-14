@@ -8,7 +8,9 @@ https://crates.io/crates/safe-manually-drop)
 https://docs.rs/safe-manually-drop)
 [![MSRV](https://img.shields.io/badge/MSRV-1.79.0-white)](
 https://gist.github.com/danielhenrymantilla/9b59de4db8e5f2467ed008b3c450527b)
-[![unsafe forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](
+[![unsafe used](https://img.shields.io/badge/unsafe-used-ffcc66.svg)](
+https://github.com/rust-secure-code/safety-dance/)
+[![so that you don't](https://img.shields.io/badge/so_that-you_dont-success.svg)](
 https://github.com/rust-secure-code/safety-dance/)
 [![License](https://img.shields.io/crates/l/safe-manually-drop.svg)](
 https://github.com/danielhenrymantilla/safe-manually-drop.rs/blob/master/LICENSE-ZLIB)
@@ -19,478 +21,515 @@ https://github.com/rust-secure-code/safety-dance/)
 
 <!-- Templated by `cargo-generate` using https://github.com/danielhenrymantilla/proc-macro-template -->
 
+Convenience wrapper type —and `trait`!— to expose owned access to a field when customizing the drop
+glue of your type.
+
+Non-macro equivalent of
+[`::drop_with_owned_fields`](https://docs.rs/drop_with_owned_fields).
+
 ---
+
+To expose _owned_ access to a `FieldTy` when drop glue is being run, this crate offers a handy,
+_0-runtime-overhead_, _non-`unsafe`_, tool:
+
+ 1. Use, instead of a `field: FieldTy`, a wrapped
+    <code>field: [SafeManuallyDrop]\<FieldTy, Self\></code>,
+
+      - (This wrapper type offers transparent
+        <code>[Deref][`::core::ops::Deref`]{,[Mut][`::core::ops::DerefMut`]}</code>, as well as
+        [`From::from()`] and ["`.into()`"][`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]
+        conversions.)
+
+ 1. then, provide the companion, mandatory,
+    <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>
+
+ 1. Profit™ (from the owned access to `FieldTy` inside of [`DropManually::drop_manually()`]'s body).
+
+      - (and also from the convenience
+        [`.into_inner_defusing_impl_Drop()`][`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]
+        which shall "deconstruct" that `FieldTy` despite the `DropManually` impl
+        (which shall get defused).)
+
+## Examples
+
+Available over [the relevant section](#enter-this-crate-safemanuallydrop-and-dropmanually).
+
+# Motivation: owned access to some field(s) on `Drop`
+
+<details class="custom" open><summary><span class="summary-box"><span>Click to hide</span></span></summary>
+
+Consider, for instance, the two following examples:
+
+## `Defer`
+
+This is basically a simpler [`::scopeguard::ScopeGuard`]. The idea is that you'd first want to
+(re)invent some kind of `defer! { … }` mechanism _via_ an _ad-hoc_ `impl Drop` type:
+
+[`::scopeguard::ScopeGuard`]: https://docs.rs/scopeguard/*/scopeguard/struct.ScopeGuard.html
+
+```rust ,ignore
+// desired usage:
+fn example() {
+    let _deferred = defer(|| {
+        println!("Bye, world!");
+    });
+
+    println!("Hello, world!");
+
+    // stuff… (even stuff that may panic!)
+
+} // <- *finally* / either way, `Bye` is printed here.
+```
+
+Here is how we could implement it:
+
+```rust ,compile_fail
+fn defer(f: impl FnOnce()) -> impl Drop {
+    return Wrapper(f);
+    // where:
+    struct Wrapper<F : FnOnce()>(F);
+
+    impl<F : FnOnce()> Drop for Wrapper<F> {
+        fn drop(&mut self) {
+            self.0() // Error, cannot move out of `self`, which is behind a `&mut` reference.
+        }
+    }
+}
+```
+
+But this fails to compile! Indeed, since `Drop` only exposes `&mut self` access on `drop()`, we only
+get `&mut` access to the closure, so the closure can only, at most, be an `FnMut()`, not an
+`FnOnce()`.
+
+  - Error message:
+
+    <details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
+
+    ```rust ,ignore
+    # /*
+    error[E0507]: cannot move out of `self` which is behind a mutable reference
+      --> src/_lib.rs:44:13
+       |
+    10 |             self.0() // Error, cannot move out of `self`, which is behind a `&mut` reference.
+       |             ^^^^^^--
+       |             |
+       |             `self.0` moved due to this call
+       |             move occurs because `self.0` has type `F`, which does not implement the `Copy` trait
+       |
+    note: this value implements `FnOnce`, which causes it to be moved when called
+      --> src/_lib.rs:44:13
+       |
+    10 |             self.0() // Error, cannot move out of `&mut` reference.
+       |             ^^^^^^
+    # */
+    ```
+
+    </details>
+
+So we either have to forgo using `FnOnce()` here, and settle for a limited API, such as
+`F : FnMut()` (as in, more limited than what we legitimately know we should be able to _soundly_
+have here: `FnOnce()`). Or we have to find a way to get _owned access on drop to our `F` field_.
+
+Another example of this problem would be the case of:
+
+## `rollback`-on-`Drop` transaction wrapper type
+
+Imagine having to deal with the following API:
+
+```rust
+mod some_lib {
+    pub struct Transaction {
+        // private fields…
+    }
+
+    // owned access in these methods for a stronger, type-state-based, API.
+    impl Transaction {
+        pub fn commit(self) {
+            // …
+        }
+
+        pub fn roll_back(self) {
+            // …
+        }
+    }
+
+    // say this does not have a default behavior on `Drop`,
+    // or one which we wish to override.
+}
+```
+
+We'd now like to have our own `WrappedTransaction` type, wrapping this API, with the added
+feature / functionality of it automagically rolling back the transaction when _implicitly_ dropped
+(_e.g._, so that `?`-bubbled-up errors and panics trigger this rollback path), expecting the users
+to explicitly `.commit()` it at the end of their happy paths.
+
+```rust
+# mod some_lib {
+#     pub struct Transaction {}
+#     impl Transaction {
+#         pub fn commit(self) {}
+#         pub fn roll_back(self) {}
+#     }
+# }
+#
+struct WrappedTransaction(some_lib::Transaction);
+
+impl WrappedTransaction {
+    fn commit(self) {
+        self.0.commit(); // OK
+    }
+}
+
+// TODO: Add `roll_back` on `Drop`
+```
+
+If we go with the naïve approach, we'd end up doing:
+
+```rust ,compile_fail
+# mod some_lib {
+#     pub struct Transaction {}
+#     impl Transaction {
+#         pub fn commit(self) {}
+#         pub fn roll_back(self) {}
+#     }
+# }
+#
+struct WrappedTransaction(some_lib::Transaction);
+
+// 👇
+impl Drop for WrappedTransaction {
+    fn drop(&mut self) {
+        // 💥 Error, cannot move out of `self`, which is behind `&mut`,
+        // yadda yadda.
+        self.0.roll_back();
+    }
+}
+
+impl WrappedTransaction {
+    fn commit(self) {
+        // Not only that, but we now also get the following extra error:
+        //
+        // 💥 Error cannot move out of type `WrappedTransaction`,
+        //    which implements the `Drop` trait
+        self.0.commit();
+    }
+}
+```
+
+  - Error message:
+
+    <details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
+
+    ```rust ,ignore
+    # /*
+    error[E0507]: cannot move out of `self` which is behind a mutable reference
+      --> src/_lib.rs:162:9
+       |
+    16 |         self.0.roll_back();
+       |         ^^^^^^ ----------- `self.0` moved due to this method call
+       |         |
+       |         move occurs because `self.0` has type `Transaction`, which does not implement the `Copy` trait
+       |
+    note: `Transaction::roll_back` takes ownership of the receiver `self`, which moves `self.0`
+      --> src/_lib.rs:153:26
+       |
+    7  |         pub fn roll_back(self) {}
+       |                          ^^^^
+    note: if `Transaction` implemented `Clone`, you could clone the value
+      --> src/_lib.rs:150:5
+       |
+    4  |     pub struct Transaction {}
+       |     ^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+    ...
+    16 |         self.0.roll_back();
+       |         ------ you could clone this value
+
+    error[E0509]: cannot move out of type `WrappedTransaction`, which implements the `Drop` trait
+      --> src/_lib.rs:171:9
+       |
+    25 |         self.0.commit();
+       |         ^^^^^^
+       |         |
+       |         cannot move out of here
+       |         move occurs because `self.0` has type `Transaction`, which does not implement the `Copy` trait
+       |
+    note: if `Transaction` implemented `Clone`, you could clone the value
+      --> src/_lib.rs:150:5
+       |
+    4  |     pub struct Transaction {}
+       |     ^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+    ...
+    25 |         self.0.commit();
+       |         ------ you could clone this value
+    # */
+    ```
+
+    </details>
+
+The first error is directly related to the lack of owned access, and instead, the limited
+`&mut self` access, which the `Drop` trait exposes in its `fn drop(&mut self)` function.
+
+  - (and the second error is a mild corollary from it, as in, the only way to extract owned access
+    to a field of a `struct` would be by _deconstructing_ it, which would entail _defusing its
+    extra/prepended drop glue_, and that is something which Rust currently conservatively rejects
+    (hard error, rather than some lint or whatnot…).)
+
+# How rustaceans currently achieve owned access in drop
+
+## Either `Option`-`{un,}wrap`ping the field
+
+The developer would wrap the field in question in an `Option`, expected to always be `Some` for
+the lifetime of every instance, but for those last-breath/deathrattle moments in `Drop`, wherein the
+field can then be `.take()`n behind the `&mut`, thereby exposing, _if all the surrounding code
+played ball_, owned access to that field.
+
+Should some other code have a bug w.r.t. this property, the `.take()` would yield `None`, and a
+`panic!` would ensue.
+
+### `Defer`
+
+```rust
+fn defer(f: impl FnOnce()) -> impl Drop {
+    return Wrapper(Some(f));
+    //             +++++ +
+    // where:
+    struct Wrapper<F : FnOnce()>(Option<F>);
+    //                           +++++++ +
+
+    impl<F : FnOnce()> Drop for Wrapper<F> {
+        fn drop(&mut self) {
+            self.0.take().expect("🤢")()
+            //    +++++++++++++++++++
+        }
+    }
+}
+```
+
+### `Transaction`
+
+```rust
+# mod some_lib {
+#     pub struct Transaction {}
+#     impl Transaction {
+#         pub fn commit(self) {}
+#         pub fn roll_back(self) {}
+#     }
+# }
+#
+struct WrappedTransaction(Option<some_lib::Transaction>);
+//                        +++++++                     +
+
+impl Drop for WrappedTransaction {
+    fn drop(&mut self) {
+        self.0.take().expect("🤢").roll_back();
+    //        ++++++++++++++++++++
+    }
+}
+
+impl WrappedTransaction {
+    /// 👇 overhauled.
+    fn commit(self) {
+        let mut this = ::core::mem::ManuallyDrop::new(self);
+        if true {
+            // naïve, simple, approach (risk of leaking *other* fields (if any))
+            let txn = this.0.take().expect("🤢");
+            txn.commit();
+        } else {
+            // better approach (it does yearn for a macro):
+            let (txn, /* every other field here */) = unsafe { // 😰
+                (
+                    (&raw const this.0).read(),
+                    // every other field here
+                )
+            };
+            txn.expect("🤢").commit();
+        };
+    }
+}
+```
+
+## Or `unsafe`-ly `ManuallyDrop`-wrapping the field
+
+The developer would wrap the field in question in a `ManuallyDrop`, expected never to have been
+`ManuallyDrop::drop()`ped already for the lifetime of every instance, but for those
+last-breath/deathrattle moments in `Drop`, wherein the field can then be `ManuallyDrop::take()`n
+behind the `&mut`, thereby exposing, _if all the surrounding code played ball_, owned access to that
+field.
+
+Should some other code have a bug w.r.t. this property, the `ManuallyDrop::take()` would be
+accessing a stale/dropped value, and UB would be _very likely_ to ensue ⚠️😱⚠️
+
+### `Defer`
+
+```rust
+fn defer(f: impl FnOnce()) -> impl Drop {
+    return Wrapper(ManuallyDrop::new(f));
+    //             ++++++++++++++++++ +
+    // where:
+    use ::core::mem::ManuallyDrop; // 👈
+
+    struct Wrapper<F : FnOnce()>(ManuallyDrop<F>);
+    //                           +++++++++++++ +
+
+    impl<F : FnOnce()> Drop for Wrapper<F> {
+        fn drop(&mut self) {
+            unsafe { // 👈 😰
+                ManuallyDrop::take(&mut self.0)()
+            //  ++++++++++++++++++
+            }
+        }
+    }
+}
+```
+
+### `Transaction`
+
+```rust
+# mod some_lib {
+#     pub struct Transaction {}
+#     impl Transaction {
+#         pub fn commit(self) {}
+#         pub fn roll_back(self) {}
+#     }
+# }
+use ::core::mem::ManuallyDrop; // 👈
+
+struct WrappedTransaction(ManuallyDrop<some_lib::Transaction>);
+//                        +++++++++++++                     +
+
+impl Drop for WrappedTransaction {
+    fn drop(&mut self) {
+        unsafe { // 😰
+            ManuallyDrop::take(&mut self.0).roll_back();
+        //  +++++++++++++++++++           +
+        }
+    }
+}
+
+impl WrappedTransaction {
+    /// 👇 overhauled.
+    fn commit(self) {
+        let mut this = ::core::mem::ManuallyDrop::new(self);
+        if true {
+            // naïve, simple, approach (risk of leaking *other* fields (if any))
+            let txn = unsafe {
+                ManuallyDrop::take(&mut this.0)
+            };
+            txn.commit();
+        } else {
+            // better approach (it does yearn for a macro):
+            let (txn, /* every other field here */) = unsafe { // 😰
+                (
+                    (&raw const this.0).read(),
+                    // every other field here
+                )
+            };
+            ManuallyDrop::into_inner(txn).commit();
+        };
+    }
+}
+```
+
+---
+
+Both of these approaches are unsatisfactory, insofar **the type system does not prevent implementing
+this pattern incorrectly**: bugs remain possible, leading to either crashes in the former
+non-`unsafe` case, or to straight up UB in the latter `unsafe` case.
+
+Can't we do better? Doesn't the `Drop` trait with its meager `&mut self` grant appear to be the
+culprit here? What if we designed a better trait (with, potentially, helper types)?
+
+# Enter this crate: `SafeManuallyDrop` and `DropManually`
+
+This is exactly what the `DropManually` trait fixes: by being more clever about the signature of its
+own "dropping function", it is able to expose, to some implementor type, owned access to one of its
+(aptly wrapped) fields:
+
+### `Defer`
+
+```rust
+fn defer(f: impl FnOnce()) -> impl Sized {
+    return Wrapper(SafeManuallyDrop::new(f));
+    // where:
+    use ::safe_manually_drop::{SafeManuallyDrop, DropManually}; // 👈
+
+    // 👇 1. instead of the `Drop` trait, use:
+    impl<F : FnOnce()> DropManually<F> for Wrapper<F> {
+        fn drop_manually(f: F) {
+            // It is *that simple*, yes!
+            f();
+        }
+    }
+
+    // 2. `SafeManuallyDrop` shall use it on `Drop`
+    struct Wrapper<F : FnOnce()>(SafeManuallyDrop<F, Self>);
+    //                           +++++++++++++++++ +++++++
+}
+```
+
+### `Transaction`
+
+```rust
+# mod some_lib {
+#     pub struct Transaction {}
+#     impl Transaction {
+#         pub fn commit(self) {}
+#         pub fn roll_back(self) {}
+#     }
+# }
+use ::safe_manually_drop::{DropManually, SafeManuallyDrop};
+
+struct WrappedTransaction(SafeManuallyDrop<some_lib::Transaction, Self>);
+//                        +++++++++++++++++                     +++++++
+
+impl DropManually<some_lib::Transaction> for WrappedTransaction {
+    fn drop_manually(txn: some_lib::Transaction) {
+        // It is *that simple*, yes!
+        txn.roll_back();
+    }
+}
+
+impl WrappedTransaction {
+    fn commit(self) {
+        // It is *that friggin' simple*, yes! (no risk to leak the other fields 🤓)
+        let txn = self.0.into_inner_defusing_impl_Drop();
+        txn.commit();
+    }
+}
+```
+
+And _voilà_ 😙👌
+
+---
+
+</details>
 
 # _Addendum_: `Drop impl` _vs._ drop glue _vs._ `drop()`
 
-It is generally rather important to properly distinguish these three notions, but especially so
-in the context of this crate!
-
-## What does `drop(value)` do?
-
-In a nutshell, _nothing_; at least within its function body, which is _utterly empty_. All of the
-`drop(value)` semantics stem, merely, from `move` semantics, wherein the _scope of `value`_ is now
-repurposed/changed/narrowed down to that of `fn drop()`'s body. Which is empty, so it just ends
-right away and returns:
-
-```rust
-fn drop<T>(value: T) {
-    // *move* semantics / all of Rust design makes it so `value` is now a local variable/binding
-    // scoped to this function body, so:
-} // <- it simply gets "discarded" here.
-```
-
-## What happens *exactly* when a `value: T` goes out of scope / gets "discarded"?
-
-The story goes as follows: in Rust, when an "owned value" (`value: T`) / owned "variable" / owned
-"binding" (even anonymous ones!) goes out of scope, it gets "_discarded_":
-
-```rust ,ignore
-    {
-        let value: T = ...;
-        ...
- // `value` gets discarded here.
- // v
-    } // <- compiler emits: `discard!(value)`, sort to speak,
-// where `discard!(value)` could be defined as:
-if const { ::core::mem::needs_drop::<T>() } {
-    unsafe {
-        // Run *the drop glue of `T`* for that `value`.
-        ptr::drop_in_place::<T>(&raw mut value);
-    }
-    // now that the value has been dropped, we can consider the bits inside `value` to be
-    // "exhausted"/empty, which I shall refer to as `Uninit<T>` (it probably won't be actually
-    // uninit, but it *morally* / logically can be deemed as such, imho).
-}
-local_storage_dealloc!(value); // makes sure the backing `Uninit<T>` storage can be repurposed.
-```
-
-So this now requires knowing what _the drop glue of `T`_ is.
-
-## The drop glue of some type `T`
-
-is defined "inductively" / structurally, as follows:
-
-  - primitive types have their own, language-hardcoded, drop glue or lack thereof.
-
-      - (most often than not, primitive types have no drop glue; the main and most notable exception
-        being `dyn Trait`s).
-
-  - the drop glue of tuples, arrays, and slices is that of its constituents (_inherent_ drop glue);
-
-  - else, _i.e._, for `struct/enum/union`s:
-
-      - (`union`s are `unsafe`, so they get no _inherent_ drop glue;)
-
-      - `enum`s get the _inherent_ drop glue of every field type of the active variant;
-
-      - `struct`s get the _inherent_ drop glue of every one of its fields (_in well-guaranteed
-        order!_ First its first fields gets `drop_in_place()`d, then its second, and so on);
-
-    Given that most primitive types, such as pointer types, have no drop glue of their own, this
-    mechanism, alone, would be unable to feature something as basic as the `free()`ing logic of the
-    drop glue of a `Box`…
-
-    Hence the need for the `PrependedDropGlue` trait:
-
-    ```rust
-    trait PrependedDropGlue {
-        fn right_before_dropping_in_place_each_field_do(&mut self);
-    }
-    ```
-
-    _e.g._,
-
-    ```rust
-    # use ::core::ptr;
-    #
-    # macro_rules! reminder_of_what_the_compiler_does_afterwards {( $($tt:tt)* ) => ( )}
-    #
-    # trait PrependedDropGlue {
-    #     fn right_before_dropping_in_place_each_field_do(&mut self);
-    # }
-    #
-    struct Box<T> {
-        ptr: *mut T, // <- output of `malloc()`/`alloc()`, say, with a
-                     //    valid/initialized `T` value.
-    }
-
-    // Right now, if a `Box<T>` were to be dropped / if `drop_in_place::<Box<T>>()`
-    // were to be called, it would just delegate to `drop_in_place::<*mut T>()`ing
-    // its one field, but that one does *nothing*, so this `Box<T>`, when dropped,
-    // so far does nothing.
-
-    // Hence:
-    impl<T> PrependedDropGlue for Box<T> {
-        fn right_before_dropping_in_place_each_field_do(&mut self) {
-          unsafe {
-            // 1. make sure our well-init/valid pointee gets itself to be dropped;
-            //    it's now or never!
-            ptr::drop_in_place::<T>(self.ptr);
-
-            // 2. since our pointer stemmed from a call to `(m)alloc` or whatnot,
-            //    we need to `free()` now, so that the `Uninit<T>` to which `self.ptr`
-            //    points can be repurposed by the allocator.
-            //
-            //    (we are papering over ZSTs).
-            ::std::alloc::dealloc(self.ptr.cast(), ::std::alloc::Layout::new::<T>());
-          }
-        }
-        // "now" the rest of inherent drop glue runs:
-        reminder_of_what_the_compiler_does_afterwards! {
-            ptr::drop_in_place::<*mut T>(&raw mut self.ptr);
-            //                   ^^^^^^                ^^^
-            //                  FieldType            field_name
-            // and so on, for each field (here, no others)
-        }
-    }
-    ```
-
-    It turns out that this trait, and method, have been showcased, in the `::core` standard library,
-    **under a different name**, which may be the ultimate root / culprit / reason as to why all this
-    "drop" terminology can get a bit confusing / easy for things to get mixed up when using the
-    typical wave-handed terminology of the Rust book.
-
-    The names used for these things in the standard library are the following:
-
-      - `PrependedDropGlue -> Drop`
-      - `fn right_before_dropping_in_place_each_field_do(&mut self)` -> `fn drop(&mut self)`.
-
-    Hence:
-
-    ```rust
-    trait Drop {
-        fn drop(&mut self);
-    }
-    ```
-
-    So, to conclude the inductive/structural definition of the drop glue of some type `T`, it's:
-
-     1. First, running, if any, the "extra, prepended, custom drop glue" for the type `T`, defined
-        within the `Drop` trait, or rather is `impl`ementation `for T`.
-
-     1. Then, transitively running the drop glue for each and every (active) field of the type.
-
-## The `Drop` trait
-
-is basically the `PrependedDropGlue` trait mentioned above.
-
-### Having drop glue _vs._ `impl`ementing `Drop`
-
-Notice how, since this is just about manually prepending custom drop glue at some layer type, the
-moment the type gets wrapped within another one, that other one shall "inherit" this drop glue by
-structural composition, and won't need, itself, to repeat that `impl PrependedDropGlue`.
-
-To better illustrate this, consider the following case study: the drop glue of [`Vec<_>`][`Vec`] &
-[`String`]:
-
-```rust
-# macro_rules! reminder_of_what_the_compiler_does_afterwards {( $($tt:tt)* ) => ()}
-# macro_rules! reminder_of_the_compiler_generated_drop_glue {( $($tt:tt)* ) => ()}
-# use ::core::{mem::size_of, ptr};
-#
-# trait PrependedDropGlue {
-#     fn right_before_dropping_in_place_each_field_do(&mut self);
-# }
-#
-struct Vec<T> {
-    ptr: *mut T,
-    len: usize,
-    capacity: usize,
-}
-
-impl<T> PrependedDropGlue for Vec<T> {
-    fn right_before_dropping_in_place_each_field_do(&mut self) {
-        let Self { ptr, len, capacity } = *self;
-        if size_of::<T>() == 0 || capacity == 0 {
-            todo!("we paper over ZSTs and 0 capacity in this basic example");
-        }
-        unsafe {
-            // 1. drop the `len` amount of init values/items;
-            ptr::slice_from_raw_parts_mut(ptr, len).drop_in_place();
-
-            // 2. deällocate the backing heap buffer.
-            ::std::alloc::dealloc(
-                ptr.cast(),
-                ::std::alloc::Layout::array::<T>(capacity)
-                    .expect("total size to be befitting, as per the very existence of the Vec")
-                ,
-            );
-        }
-    }
-    reminder_of_what_the_compiler_does_afterwards! {
-        ptr::drop_in_place::<*mut T>(&raw mut self.ptr); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut self.len); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut self.capacity); // does nothing
-    }
-}
-
-/// A `String` is "just" a `Vec<u8>` but with the invariant that the `..len` bytes
-/// are (the) valid UTF-8 (encoding of some abstract string value).
-struct String {
-    utf8_buffer: Vec<u8>,
-}
-
-reminder_of_the_compiler_generated_drop_glue! {
-    // 1. prepended drop glue, if any:
-    /* None! */
-
-    // 2. inherent / structurally inherited sub-drop-glue(s).
-    ptr::drop_in_place::<Vec<u8>>(&raw mut self.utf8_buffer);
-    // i.e.
-    {
-        let vec: &mut Vec<u8> = &mut self.utf8_buffer;
-
-        // 1. prepended drop glue, if any
-        <Vec<u8> as PrependendDropGlue>::right_before_dropping_in_place_each_field_do(
-            vec,
-        );
-
-        // 2. inherent / structurally inherited sub-drop-glues.
-        ptr::drop_in_place::<*mut T>(&raw mut vec.ptr); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut vec.len); // does nothing
-        ptr::drop_in_place::<usize>(&raw mut vec.capacity); // does nothing
-    }
-}
-```
-
-> So, in light of this, do we need to `impl PrependedDropGlue for String {`?
->
-> No!
-
-Since it contains a `Vec<u8>` field, all of the drop glue of a `Vec<u8>`, including the
-`PrependedDropGlue for Vec<u8>` logic shall get invoked already.
-
-And such logic already takes care of managing the resources of the `Vec`. Which means that such
-resources get properly cleaned up / reclaimed assuming `Vec`'s own logic does (which it indeed
-does). So `String` need not do anything, and in fact, ought very much not to be doing anything,
-lest double-freeing ensues.
-
-> ➡️ Artificially prepended drop glue logic becomes inherent / structurally inherited drop glue at
-> the next layer of type wrapping.
-
-This means we end up in a sitation wherein:
-
-  - `Vec<…> : PrependedDropGlue`
-  - `String :! /* its _own_ layer of */ PrependedDropGlue`.
-
-And yet both have meaningful drop glue:
-
-  - manually/explicitly prepended for `Vec`,
-  - and structurally _inherent_/inherited for `String`.
-
-In "drop/`Drop`" parlance:
-
-  - <code>[Vec]\<_\> : [Drop]</code>;
-
-  - <code>[String] :! [Drop]</code> (and yet [`::core::mem::needs_drop::<String>()`] is `true`);
-
-      - ([`::core::mem::needs_drop()`] expresses whether a given type has any drop glue whatsoever.)
-
-This is generally why having `T : Drop` kind of bounds in generics is an anti-pattern —an explicitly
-linted one!—, and a big smell indicating that the person having written this has not properly
-understood these nuances (which, again, is a very legitimate mistake to make, since the Rust
-standard library has used the "drop" word, alone, for three distinct things, `Drop`,
-`fn drop(&mut self)`, and `fn drop<T>(_: T)`, and that is without including the fourth occurrence of
-the name, in `drop_in_place()`. As a reminder, the first two usages of "drop" here refer to
-prepended drop glue, the third usage, `fn drop<T>(_: T)`, refers rather about _discarding_ a value /
-forcing it to go out of scope, and the fourth and last usage, `drop_in_place()` (along
-`needs_drop()`) finally refers to the proper act of dropping a value, as in, running all of its drop
-glue (both the prepended one, if any, and the structurally inherited one)).
-
-### `&mut` or owned access in `Drop`?
-
-With all that has been said, it should now be clear(er) why that trait only exposes _temporary_
-`&mut self` access to `self`, rather than the naïvely expected _owned access_.
-
-Indeed, if we received owned access to `self` in the `fn drop(…)` function, it would mean, as per
-the ownership / move semantics of the language, running into a situation where the owned `self`
-would run out of scope, get discarded, and thus, get _dropped_ (in place) / get its drop glue
-invoked, which would mean invoking this (`Prepended`)`Drop`(`Glue`) first, which would discard this
-owned `self`, _ad infinitum et nauseam_[^nauseam].
-
-[^nauseam]: probably a stack overflow due to infinite recursion, else "just" a plain old
-thread-hanging infinite loop.
-
- 1. Which means every `DropOwned` impl, if it existed, would have to make sure to `forget(self)` at
-    the end of its scope!
-
- 1. But even if we did that (to avoid the infinite recursion problem), we'd still have the problem
-    of the inherent drop glue then dropping each field "again".
-
-    Because, again, at the end of the day, `PrependedDropGlue` is not the full, drop-glue picture!
-    Owned access to the being-dropped(-in-place) resource cannot be offered in `PrependedDropGlue`,
-    since it represents just a _prelude_, after which access to the being-dropped(-in-place) value is
-    relinquished, passed on to the rest of the [`drop_in_place()`][`::core::ptr::drop_in_place()`]
-    machinery.
-
-    So to avoid this we'd have to also `forget()` every field beforehand; at which point, what has
-    been the point of that initial owned access to begin with?
-
-## What would it take to have owned access in custom drop glue / `drop_in_place()` logic?
-
-Well, if we stare at those two previous points, we can see a path forward towards "the perfect
-`DropGlue` trait".
-
-  - Starting from the latter bullet, this part can be solved in one of two ways:
-
-      - as a library abstraction, by having the fields be [`ManuallyDrop`]-wrapped, since that
-        effectively disables the structurally inherited drop glue for that field (so if it is done
-        for each and every field we have effectively gotten rid of all of the structurally inherited
-        drop glue);
-
-      - as a language tweak, it would be trivial for the language to just stop injecting the
-        structurally-inherited drop glue if the trait overriding the _whole_ drop glue were to be
-        present;
-
-  - Then, back to the former bullet, in order to avoid the infinite recursion of `self` drop issue,
-    the solution is simply a matter of picking the owned types involved with a bit more of
-    _finesse_: rather than getting full, owned, access to `self: Self` on `drop()`, we'd be getting
-    per field, owned access, to each field type.
-
-So here is what such a trait could look like:
-
-```rust ,ignore
-// In pseudo-code.
-trait OverrideDropGlue {
-    fn drop(Self { ..fields });
-}
-
-// A concrete example:
-struct CustomDropOrder {
-    a: A,
-    b: B,
-    c: C,
-}
-
-impl OverrideDropGlue for CustomDropOrder {
-    fn drop(a: A, b: B, c: C) {
-        drop(b);
-        drop(c);
-        drop(a);
-    }
-}
-```
-
-or, imagining some syntax sugar here to make it a tad clearer:
-
-```rust ,ignore
-impl OverrideDropGlue for CustomDropOrder {
-    fn drop(Self { a, b, c }) {
-        drop(b);
-        drop(c);
-        drop(a);
-    }
-}
-```
-
-  - What I like about this last syntax is that braced-`struct` destructuring, if it were
-    _ever_[^hope] available to an `impl PrependedDropGlue` (or an `impl OverrideDropGlue` type),
-    would entail "defusing"/bypassing/skipping it, and instead, just extracting raw access to the
-    fields; which is _exactly_ the desired behavior here! That _defusing_ is exactly what avoids
-    the infinitely recursive drop logic in a neat and succint way!
-
-[^hope]: I really thing we should be given such a tool, even if it would entail memory leaks in
-visibility-capable codebases doing things such as
-```rust ,ignore
-let MyVec { ptr, len, cap } = vec; // same as into_raw_parts, leaky pattern!
-```
-
-### Back to this crate, or to `::drop_with_owned_fields`
-
-Now, if you stare at what either this crate, or even more so the companion
-[`::drop_with_owned_fields`] crate, do, you'll notice it's all trying to offer a user-library /
-third-party-library powered way to offer such an API to users of this library.
-
-[`::drop_with_owned_fields`]: https://docs.rs/drop-with-owned-fields/^0.1.1
-
-Using [`::drop_with_owned_fields`] for instance:
-
-```rust
-use ::drop_with_owned_fields::prelude::*;
-#
-# struct A; struct B; struct C;
-
-#[drop_with_owned_fields(as _)]
-struct CustomDropOrder {
-    a: A,
-    b: B,
-    c: C,
-}
-
-#[drop_with_owned_fields]
-impl Drop for CustomDropOrder {
-    fn drop(Self { a, b, c }: _) {
-        drop(b);
-        drop(c);
-        drop(a);
-    }
-}
-#
-# fn main() {}
-```
-
-  - Notice how, for the sake of being less jarring to users, that macro API asks for the `Drop`
-    trait to be involved, since it's probably the least surprising choice for unaware users.
-
-    But you 🫵 attentive reader of my whole diatribe, should know better: since `Drop` means
-    `PrependedDropGlue`, it's not the right trait to be using in this scenario.
-
-    You can go and be explicit even with that macro API, if you forgo its `drop_sugar` API and
-    eponymous Cargo feature:
-
-    ```rust
-    use ::drop_with_owned_fields::prelude::*;
-    #
-    # struct A; struct B; struct C;
-
-    #[drop_with_owned_fields(as struct Fields)]
-    struct CustomDropOrder {
-        a: A,
-        b: B,
-        c: C,
-    }
-
-    impl DropWithOwnedFields for CustomDropOrder {
-        fn drop(Fields { a, b, c }: DestructuredFieldsOf<CustomDropOrder>) {
-            drop(b);
-            drop(c);
-            drop(a);
-        }
-    }
-    #
-    # fn main() {}
-    ```
-
-    The resulting `DropWithOwnedFields` is the closest a library API can get to the dreamed
-    `OverrideDropGlue` trait and language support.
-
-___
-
-And using this very crate rather than macros:
-
-```rust
-//! Look ma, no macros!
-
-use ::safe_manually_drop::prelude::*;
-#
-# struct A; struct B; struct C;
-
-struct CustomDropOrder(
-    SafeManuallyDrop<Fields, Self>,
-);
-
-struct Fields {
-    a: A,
-    b: B,
-    c: C,
-}
-
-impl DropManually<Fields> for CustomDropOrder {
-    fn drop_manually(Fields { a, b, c }: Fields) {
-        drop(b);
-        drop(a);
-        drop(c);
-    }
-}
-```
+  - See [the relevant module][`appendix`]
+
+It is generally rather important to properly distinguish between these three notions, but especially
+so in the context of this crate!
+
+Only skip this section if you can confidently answer what `drop` means in the context of:
+
+  - `trait Drop { fn drop(&mut self); }`
+  - `mem::drop::<T>(…);`
+  - `ptr::drop_in_place::<T>(…);`
+  - `mem::needs_drop::<T>();`
+
+and if it is obvious to you that `String` does _not_ `impl Drop`.
+
+[SafeManuallyDrop]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html
+[`SafeManuallyDrop`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html
+[`SafeManuallyDrop::into_inner_defusing_impl_Drop()`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/struct.SafeManuallyDrop.html#method.into_inner_defusing_impl_Drop
+[`DropManually`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/trait.DropManually.html
+[`DropManually::drop_manually()`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/trait.DropManually.html#tymethod.drop_manually
+[`appendix`]: https://docs.rs/safe-manually-drop/^0.1.0/safe_manually_drop/appendix/index.html
+
+[`ManuallyDrop`]: https://doc.rust-lang.org/stable/core/mem/struct.ManuallyDrop.html
+[`::core::ops::Deref`]: https://doc.rust-lang.org/stable/core/ops/trait.Deref.html
+[`::core::ops::DerefMut`]: https://doc.rust-lang.org/stable/core/ops/trait.DerefMut.html
+[`Drop`]: https://doc.rust-lang.org/stable/core/ops/trait.Drop.html
+[`Option`]: https://doc.rust-lang.org/stable/core/option/enum.Option.html
+[`From::from()`]: https://doc.rust-lang.org/stable/core/convert/trait.From.html#tymethod.from
