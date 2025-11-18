@@ -1,5 +1,11 @@
 # `::safe-manually-drop`
 
+Convenience wrapper type —and `trait`!— to expose owned access to a field when customizing the drop
+glue of your type.
+
+  - 😌 Non-macro equivalent of
+[`::drop_with_owned_fields`](https://docs.rs/drop_with_owned_fields). 😌
+
 [![Repository](https://img.shields.io/badge/repository-GitHub-brightgreen.svg)](
 https://github.com/danielhenrymantilla/safe-manually-drop.rs)
 [![Latest version](https://img.shields.io/crates/v/safe-manually-drop.svg)](
@@ -20,12 +26,6 @@ https://github.com/danielhenrymantilla/safe-manually-drop.rs/actions)
 https://github.com/rust-secure-code/safety-dance/)
 
 <!-- Templated by `cargo-generate` using https://github.com/danielhenrymantilla/proc-macro-template -->
-
-Convenience wrapper type —and `trait`!— to expose owned access to a field when customizing the drop
-glue of your type.
-
-Non-macro equivalent of
-[`::drop_with_owned_fields`](https://docs.rs/drop_with_owned_fields).
 
 ---
 
