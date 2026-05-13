@@ -39,11 +39,34 @@ mod prelude {
 /// The main/whole point of this whole crate and design: to expose _owned_ access to a `FieldTy`
 /// when drop glue is being run.
 ///
-///   - A [`SafeManuallyDrop<FieldTy, ContainingType>`],
-///   - with a (mandatory)
+///  1. A [`SafeManuallyDrop<FieldTy, ContainingType>`],
+///  1. with a (mandatory)
 ///     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
-///   - once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
-///   - shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
+///  1. once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
+///  1. shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
+///
+/// ```rust
+/// # use drop as stuff;
+/// use ::safe_manually_drop::SafeManuallyDrop;
+///
+/// struct Frobnicator {
+///     // …
+/// }
+///
+/// struct Example {
+///     //    ^
+///     //    +--------------------------------+
+///     //                                     |
+///     string: SafeManuallyDrop<Frobnicator, Self>,
+/// } //                                       |
+/// //                                         +-------------vvvvvvv
+/// impl ::safe_manually_drop::DropManually<Frobnicator> for Example {
+///     fn drop_manually(owned_frobnicator: Frobnicator) {
+///         //  owned access! 👆
+///         stuff(owned_frobnicator)
+///     }
+/// }
+/// ```
 ///
 /// In practice, this becomes _the_ handy, 0-runtime-overhead, non-`unsafe`, tool to get owned
 /// access to a `struct`'s field (or group thereof) during drop glue.
@@ -73,24 +96,33 @@ mod prelude {
 /// shall _supersede_ / override its default drop glue.
 ///
 /// ```rust
+/// # use drop as stuff;
 /// use ::safe_manually_drop::prelude::*;
 ///
 /// pub struct MyType(SafeManuallyDrop<String, Self>);
 ///
 /// impl DropManually<String> for MyType {
 ///     fn drop_manually(s: String) {
-///         // stuff…
-///     } // <- unless `s` has been moved out (e.g., though `mem::forget()`),
-///       //    `s`' own drop glue (e.g., here, that of `String`) gets automagically
-///       //    invoked, rather similarly to the classic `Drop` trait.
-///       //    But the huge difference is that this function body had to *allow* it
-///       //    to happen, by not having *consumed* the owned `s: String` in some other
-///       //    way.
+///         // Notice the fully owned access to `s`.
+///         stuff(s)
+///         // Notably, if `s` is not moved out / "consumed",
+///         // then `s`' own drop glue (e.g., here, that of `String`) will be automagically
+///         // *implicitly* invoked when `s` goes out of scope at the end of the block.
+///         //
+///         // This may appear rather similar to the classic `Drop` trait, but there is
+///         // a huge difference: this function body had to *allow* for the implicit
+///         // drop and fall-out-of-scope to happen, by not having *consumed* the owned
+///         // `s: String` in some other way.
+///         //
+///         // To illustrate, the body could very well, for instance, `mem::forget(s)`,
+///         // and no `drop` of the `string` would happen, which is not something
+///         // *directly* doable with the `Drop` trait.
+///     }
 /// }
 ///
 /// fn example(it: MyType) {
 ///     drop(it); // invokes the drop glue of `MyType`,
-///               // i.e., the `Drop` impl `for SafeManuallyDrop<String, MyType>`
+///               // including the `Drop` impl `for SafeManuallyDrop<String, MyType>`
 ///               // i.e., `<MyType as DropManually<String>>::drop_manually()`.
 /// }
 /// ```
@@ -146,46 +178,40 @@ trait DropManually<FieldTy> {
 /// [`SafeManuallyDrop<FieldTy>`] is the safe counterpart of [`ManuallyDrop<FieldTy>`], and the
 /// zero-runtime-overhead counterpart of [`Option<FieldTy>`].
 ///
-/// ## Example
+///   - A [`SafeManuallyDrop<FieldTy, ContainingType>`],
+///   - with a (mandatory)
+///     <code>impl [DropManually\<FieldTy\>][`DropManually`] for ContainingType {</code>,
+///   - once it gets dropped / during its drop glue (_e.g._, from within a `ContainingType`),
+///   - shall be running the [`DropManually::drop_manually()`] logic on that _owned_ `FieldTy`.
 ///
-///   - Using [`ManuallyDrop<FieldTy>`] and `unsafe`:
+/// ```rust
+/// # use drop as stuff;
+/// use ::safe_manually_drop::SafeManuallyDrop;
 ///
-///     ```rust
-///     #![deny(unsafe_code)] // require visible `#[allow()]`s in subtle functions.
+/// struct Frobnicator {
+///     // …
+/// }
 ///
-///     use ::core::mem::ManuallyDrop;
-///
-///     pub
-///     struct DeferGuard<T, F : FnOnce(T)> {
-///         value: ManuallyDrop<T>,
-///         on_drop: ManuallyDrop<F>,
+/// struct Example {
+///     //    ^
+///     //    +--------------------------------+
+///     //                                     |
+///     string: SafeManuallyDrop<Frobnicator, Self>,
+/// } //                                       |
+/// //                                         +-------------vvvvvvv
+/// impl ::safe_manually_drop::DropManually<Frobnicator> for Example {
+///     fn drop_manually(owned_frobnicator: Frobnicator) {
+///         //  owned access! 👆
+///         stuff(owned_frobnicator)
 ///     }
+/// }
+/// ```
 ///
-///     impl<T, F : FnOnce(T)> Drop for DeferGuard<T, F> {
-///         fn drop(&mut self) {
-///             #[allow(unsafe_code)] {
-///                 let value = unsafe { // 😰
-///                     ManuallyDrop::take(&mut self.value)
-///                 };
-///                 let on_drop = unsafe { // 😰
-///                     ManuallyDrop::take(&mut self.on_drop)
-///                 };
-///                 on_drop(value);
-///             }
-///         }
-///     }
+/// ## Examples
 ///
-///     impl<T, F : FnOnce(T)> ::core::ops::Deref for DeferGuard<T, F> {
-///         type Target = T;
+///   - Using [`Option<FieldTy>`]: [`.unwrap()`][`Option::unwrap()`]s everywhere 🤢
 ///
-///         fn deref(&self) -> &T {
-///             &self.value
-///         }
-///     }
-///     // And `DerefMut`
-///     ```
-///
-///   - Using [`Option<FieldTy>`] and [`.unwrap()`][`Option::unwrap()`]s everywhere…
+///     <details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
 ///
 ///     ```rust
 ///     #![forbid(unsafe_code)]
@@ -223,6 +249,49 @@ trait DropManually<FieldTy> {
 ///     }
 ///     // And `DerefMut`
 ///     ```
+///
+///     </details>
+///
+///   - Using [`ManuallyDrop<FieldTy>`]: `unsafe`! 😱
+///
+///     <details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
+///
+///     ```rust
+///     #![deny(unsafe_code)] // require visible `#[allow()]`s in subtle functions.
+///
+///     use ::core::mem::ManuallyDrop;
+///
+///     pub
+///     struct DeferGuard<T, F : FnOnce(T)> {
+///         value: ManuallyDrop<T>,
+///         on_drop: ManuallyDrop<F>,
+///     }
+///
+///     impl<T, F : FnOnce(T)> Drop for DeferGuard<T, F> {
+///         fn drop(&mut self) {
+///             #[allow(unsafe_code)] {
+///                 let value = unsafe { // 😰
+///                     ManuallyDrop::take(&mut self.value)
+///                 };
+///                 let on_drop = unsafe { // 😰
+///                     ManuallyDrop::take(&mut self.on_drop)
+///                 };
+///                 on_drop(value);
+///             }
+///         }
+///     }
+///
+///     impl<T, F : FnOnce(T)> ::core::ops::Deref for DeferGuard<T, F> {
+///         type Target = T;
+///
+///         fn deref(&self) -> &T {
+///             &self.value
+///         }
+///     }
+///     // And `DerefMut`
+///     ```
+///
+///     </details>
 ///
 ///   - Using [`SafeManuallyDrop<FieldTy, …>`][`SafeManuallyDrop`]: no `unsafe`, no `.unwrap()`s!
 ///
@@ -338,6 +407,16 @@ trait DropManually<FieldTy> {
 ///
 /// ## Going further
 ///
+/// ### `repr()` guarantee.
+///
+/// This type is guaranteed to be a mere `#[repr(transparent)]` wrapper around its `FieldTy`.
+///
+/// ### The second type parameter is an orphan rules "named `impl` identifier"
+///
+/// This section may be a bit of a "brain fuck", and it is safe to skip.
+///
+/// <details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
+///
 /// In practice, neither the API of this crate, nor that of any non-macro API for that matter, can
 /// ever hope to check, impose, nor control that the `ContainingType` used for a
 /// [`SafeManuallyDrop<FieldTy, ContainingType>`] do match that of the containing `struct`.
@@ -345,10 +424,11 @@ trait DropManually<FieldTy> {
 /// And, as a matter of fact, there may even be legitimate cases where you may do so on purpose.
 ///
 /// Indeed, this extra type parameter is, at the end of the day, a mere `impl DropManually`
-/// "identifier" / discriminant for it to be possible for anybody to write such impls for arbitrary
-/// `FieldTy` types, even when the `FieldTy` is a fully unconstrained/blanket `<T>/<F>` generic
-/// type, and/or when it stems from an upstream crate, or even when wanting to repeat
-/// `SafeManuallyDrop<FieldTy, …>` multiple types within the same `struct`.
+/// "identifier" / "named impl" / type-level discriminant for it to be possible for anybody to write
+/// such impls for arbitrary `FieldTy` types, even when the `FieldTy` is a fully
+/// unconstrained/blanket `<T>/<F>` generic type, and/or when it stems from an upstream crate,
+/// or even when wanting to repeat `SafeManuallyDrop<FieldTy, …>` multiple types within the same
+/// `struct`, _&&without running afoul the orphan rules**_.
 ///
 /// In such a case, you may want distinct drop logic for one field _vs._ another.
 ///
@@ -398,9 +478,7 @@ trait DropManually<FieldTy> {
 /// }
 /// ```
 ///
-/// ### `repr()` guarantee.
-///
-/// This type is guaranteed to be a mere `#[repr(transparent)]` wrapper around its `FieldTy`.
+/// </details>
 ///
 /// ### A silly, but interesting example: DIY-ing our own `ManuallyDrop<T>`
 ///
