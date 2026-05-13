@@ -14,7 +14,7 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(doc), no_std)]
 #![allow(unused_braces)]
-#![cfg_attr(feature = "better-docs", feature(doc_cfg))]
+#![cfg_attr(feature = "better-docs", feature(doc_cfg, negative_impls))]
 
 use ::core::{
     marker::PhantomData as PD,
@@ -467,17 +467,6 @@ impl<FieldTy, ContainingType : DropManually<FieldTy>> SafeManuallyDrop<FieldTy, 
     pub
     const
     fn new(value: FieldTy) -> Self {
-        #[allow(non_local_definitions)]
-        impl<FieldTy, ContainingType : DropManually<FieldTy>>
-            From<FieldTy>
-        for
-            SafeManuallyDrop<FieldTy, ContainingType>
-        {
-            fn from(field: FieldTy) -> Self {
-                Self::new(field)
-            }
-        }
-
         Self {
             _phantom: PD,
             field: MD::new(value),
@@ -536,6 +525,117 @@ for
     #[inline]
     fn deref_mut(&mut self) -> &mut FieldTy {
         &mut self.field
+    }
+}
+
+impl<FieldTy, ContainingType : DropManually<FieldTy>>
+    From<FieldTy>
+for
+    SafeManuallyDrop<FieldTy, ContainingType>
+{
+    fn from(field: FieldTy) -> Self {
+        Self::new(field)
+    }
+}
+
+impl<FieldTy : Default, ContainingType : DropManually<FieldTy>>
+    Default
+for
+    SafeManuallyDrop<FieldTy, ContainingType>
+{
+    #[inline]
+    fn default() -> Self {
+        FieldTy::default().into()
+    }
+}
+
+mod deref_impls {
+    #![deny(unconditional_recursion)]
+
+    use ::core::{
+        cmp,
+        fmt,
+        hash,
+    };
+    use super::*;
+
+    JustDerefTM!(
+        impl[..: fmt::Debug] fmt::Debug ,for SafeManuallyDrop<..> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+        }
+
+        impl[..: hash::Hash] hash::Hash ,for SafeManuallyDrop<..> {
+            fn hash[H: hash::Hasher](&self, state: &mut H);
+        }
+
+        impl[..: PartialEq] PartialEq ,for SafeManuallyDrop<..> {
+            fn eq(&self, other: &Self) -> bool;
+        }
+
+        impl[..: Eq] Eq ,for SafeManuallyDrop<..> {}
+
+        impl[..: PartialOrd] PartialOrd ,for SafeManuallyDrop<..> {
+            fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering>;
+        }
+
+        impl[..: Ord] Ord ,for SafeManuallyDrop<..> {
+            fn cmp(&self, other: &Self) -> cmp::Ordering;
+        }
+    );
+    // where:
+    macro_rules! JustDerefTM {(
+        $(
+            impl[..: $($Bounds:tt)*] $Trait:path ,for SafeManuallyDrop<..> {
+                $(
+                    fn $fname:ident $([$($generics:tt)*])? (
+                        &$self:ident $(,
+                        $rest:ident: $Rest:ty)* $(,)?
+                    ) $(-> $Ret:ty)?;
+                )*
+            }
+        )*
+    ) => (
+        $(
+            impl<FieldTy: $($Bounds)*, ContainingType : DropManually<FieldTy>>
+                $Trait
+            for
+                SafeManuallyDrop<FieldTy, ContainingType>
+            {
+                $(
+                    #[inline]
+                    fn $fname $(<$($generics)*>)? (
+                        &$self $(,
+                        $rest: $Rest )*
+                    ) $(-> $Ret)?
+                    {
+                        FieldTy::$fname($self $(, $rest)*)
+                    }
+                )*
+            }
+        )*
+    )} use JustDerefTM;
+}
+
+#[cfg(feature = "better-docs")]
+/// Deliberately not implemented
+impl<FieldTy, ContainingType : DropManually<FieldTy>>
+    !Clone
+for
+    SafeManuallyDrop<FieldTy, ContainingType>
+{}
+
+#[cfg(not(feature = "better-docs"))]
+#[doc(hidden)]
+#[allow(warnings, clippy::all)]
+impl<FieldTy, ContainingType : DropManually<FieldTy>>
+    /* !*/Clone // deliberately not implemented
+for
+    SafeManuallyDrop<FieldTy, ContainingType>
+where
+    for<'never> dyn Drop : Clone,
+{
+    fn clone(&self) -> Self {
+        const { unreachable!() }
     }
 }
 
