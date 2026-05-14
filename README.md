@@ -56,7 +56,7 @@ Available over [the relevant section](#enter-this-crate-safemanuallydrop-and-dro
 
 # Motivation: owned access to some field(s) on `Drop`
 
-<details class="custom" open><summary><span class="summary-box"><span>Click to hide</span></span></summary>
+<details class="custom"><summary><span class="summary-box"><span>Click to show</span></span></summary>
 
 Consider, for instance, the two following examples:
 
@@ -85,15 +85,17 @@ Here is how we could implement it:
 
 ```rust ,compile_fail
 fn defer(f: impl FnOnce()) -> impl Drop {
-    return Wrapper(f);
-    // where:
-    struct Wrapper<F : FnOnce()>(F);
+    struct Wrapper<F : FnOnce()> {
+        f: F,
+    }
 
     impl<F : FnOnce()> Drop for Wrapper<F> {
         fn drop(&mut self) {
-            self.0() // Error, cannot move out of `self`, which is behind a `&mut` reference.
+            (self.f)() // Error, cannot move out of `self`, which is behind a `&mut` reference.
         }
     }
+
+    Wrapper { f }
 }
 ```
 
@@ -110,17 +112,17 @@ get `&mut` access to the closure, so the closure can only, at most, be an `FnMut
     error[E0507]: cannot move out of `self` which is behind a mutable reference
       --> src/_lib.rs:44:13
        |
-    10 |             self.0() // Error, cannot move out of `self`, which is behind a `&mut` reference.
-       |             ^^^^^^--
+    10 |             (self.f)() // Error, cannot move out of `self`, which is behind a `&mut` reference.
+       |             ^^^^^^^^--
        |             |
-       |             `self.0` moved due to this call
-       |             move occurs because `self.0` has type `F`, which does not implement the `Copy` trait
+       |             `self.f` moved due to this call
+       |             move occurs because `self.f` has type `F`, which does not implement the `Copy` trait
        |
     note: this value implements `FnOnce`, which causes it to be moved when called
       --> src/_lib.rs:44:13
        |
-    10 |             self.0() // Error, cannot move out of `&mut` reference.
-       |             ^^^^^^
+    10 |             (self.f)() // Error, cannot move out of `&mut` reference.
+       |             ^^^^^^^^
     # */
     ```
 
@@ -290,17 +292,21 @@ Should some other code have a bug w.r.t. this property, the `.take()` would yiel
 
 ```rust
 fn defer(f: impl FnOnce()) -> impl Drop {
-    return Wrapper(Some(f));
-    //             +++++ +
-    // where:
-    struct Wrapper<F : FnOnce()>(Option<F>);
-    //                           +++++++ +
+    struct Wrapper<F : FnOnce()> {
+        f: Option<F>,
+        // +++++++ +
+    }
 
     impl<F : FnOnce()> Drop for Wrapper<F> {
         fn drop(&mut self) {
-            self.0.take().expect("🤢")()
-            //    +++++++++++++++++++
+            (self.f).take().expect("🤢")()
+            //      ++++++++++++++++++++
         }
+    }
+
+    Wrapper {
+        f: Some(f),
+        // +++++ +
     }
 }
 ```
@@ -363,21 +369,25 @@ accessing a stale/dropped value, and UB would be _very likely_ to ensue ⚠️�
 
 ```rust
 fn defer(f: impl FnOnce()) -> impl Drop {
-    return Wrapper(ManuallyDrop::new(f));
-    //             ++++++++++++++++++ +
-    // where:
     use ::core::mem::ManuallyDrop; // 👈
 
-    struct Wrapper<F : FnOnce()>(ManuallyDrop<F>);
-    //                           +++++++++++++ +
+    struct Wrapper<F : FnOnce()> {
+        f: ManuallyDrop<F>,
+        // +++++++++++++ +
+    }
 
     impl<F : FnOnce()> Drop for Wrapper<F> {
         fn drop(&mut self) {
             unsafe { // 👈 😰
-                ManuallyDrop::take(&mut self.0)()
-            //  ++++++++++++++++++
+                ManuallyDrop::take(&mut self.f)()
+            //  ++++++++++++++++++ +++++
             }
         }
+    }
+
+    Wrapper {
+        f: ManuallyDrop::new(f),
+    //     ++++++++++++++++++ +
     }
 }
 ```
@@ -449,21 +459,32 @@ own "dropping function", it is able to expose, to some implementor type, owned a
 
 ```rust
 fn defer(f: impl FnOnce()) -> impl Sized {
-    return Wrapper(SafeManuallyDrop::new(f));
-    // where:
-    use ::safe_manually_drop::{SafeManuallyDrop, DropManually}; // 👈
+    use ::safe_manually_drop::SafeManuallyDrop; // 👈
 
-    // 👇 1. instead of the `Drop` trait, use:
-    impl<F : FnOnce()> DropManually<F> for Wrapper<F> {
+    struct Wrapper<F : FnOnce()> {
+        // 1. Wrap the field(s) for which owned access in drop is desired
+        //    in `SafeManuallyDrop<_, Self>`
+        // 👇
+        f: SafeManuallyDrop<F, Self>,
+        // ++++++++++++++++ +++++++
+    }
+
+    // 2. instead of the `Drop` trait, use: 👇
+    impl<F : FnOnce()> ::safe_manually_drop::DropManually<F> for Wrapper<F> {
         fn drop_manually(f: F) {
-            // It is *that simple*, yes!
+            // It is *that simple*, yes: `Wrapper<F>`'s
+            // `Drop for SafeManuallyDrop<F, …>` shall call this.
             f();
         }
     }
 
-    // 2. `SafeManuallyDrop` shall use it on `Drop`
-    struct Wrapper<F : FnOnce()>(SafeManuallyDrop<F, Self>);
-    //                           +++++++++++++++++ +++++++
+    return Wrapper {
+        // 3. There is an obvious, simple, constructor, much like for `ManuallyDrop`.
+        f: SafeManuallyDrop::new(f)
+    };
+
+    // The wrapper implements `Deref{,Mut}` and transparently forwards
+    // `Debug`, and other similar traits, for convenience.
 }
 ```
 
